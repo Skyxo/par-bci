@@ -4,3 +4,4 @@ pyriemann
 mne
 pylsl
 colorama
+torch

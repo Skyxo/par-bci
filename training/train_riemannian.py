@@ -1,96 +1,242 @@
+import pygame
+import sys
+import os
+import time
+import threading
 import numpy as np
+import pandas as pd
+import mne
+import joblib
+import glob
 from sklearn.pipeline import make_pipeline
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import train_test_split
 from pyriemann.estimation import Covariances
 from pyriemann.tangentspace import TangentSpace
-import mne
 
-# ==========================================
-# 1. CONFIGURATION FOR OPENBCI
-# ==========================================
-# OpenBCI Cyton sampling rate is 250Hz
-SFREQ = 250 
+# Configuration
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+SFREQ = 250
+CH_NAMES = ['FC3', 'FC4', 'CP3', 'Cz', 'C3', 'C4', 'Pz', 'CP4']
 
-# Define channels relevant for Motor Imagery (MI)
-# Note: For MI, we prioritize C3 (Right Hand), C4 (Left Hand), Cz (Feet).
-# We ignore Fp1/Fp2 here as they are mostly artifacts/eye blinks.
-CH_NAMES = ['Cz', 'FCz', 'P3', 'Pz', 'C3', 'C4', 'O1', 'P4']
-n_channels = len(CH_NAMES)
+# Colors
+BG_COLOR = (15, 15, 20)
+TEXT_COLOR = (220, 220, 230)
+ACCENT_COLOR = (0, 180, 255)
+SUCCESS_COLOR = (50, 200, 80)
+ERROR_COLOR = (255, 80, 80)
 
-# ==========================================
-# 2. LOAD PREPROCESSED DATA
-# ==========================================
-print("Loading real EEG data...")
+class TrainingGUI:
+    def __init__(self):
+        pygame.init()
+        self.width, self.height = 600, 400
+        self.screen = pygame.display.set_mode((self.width, self.height))
+        pygame.display.set_caption("BCI Model Training")
+        self.clock = pygame.time.Clock()
+        self.font = pygame.font.SysFont("Arial", 24)
+        self.font_small = pygame.font.SysFont("Arial", 18)
+        
+        self.status_message = "Initializing..."
+        self.sub_message = ""
+        self.progress = 0.0
+        self.finished = False
+        self.success = False
+        self.accuracy = 0.0
+        
+        # Threading for non-blocking UI
+        self.thread = threading.Thread(target=self.run_training)
+        self.thread.start()
+        
+    def get_all_csvs(self):
+        pattern = os.path.join(BASE_DIR, "EEG_Session_*.csv")
+        files = glob.glob(pattern)
+        return sorted(files)
 
-try:
-    X = np.load('../data/processed/X.npy')
-    y = np.load('../data/processed/y.npy')
-    print(f"Loaded X: {X.shape}, y: {y.shape}")
-except FileNotFoundError:
-    print("Error: Preprocessed data not found. Run 'preprocess_eeg.py' first.")
-    exit()
+    def run_training(self):
+        time.sleep(1) # Visual pause
+        
+        # 1. FIND DATA
+        self.status_message = "Searching for data..."
+        self.progress = 0.1
+        csv_files = self.get_all_csvs()
+        
+        if not csv_files:
+            self.status_message = "Error: No CSV file found."
+            self.sub_message = "Please run Acquisition first."
+            self.finished = True
+            self.success = False
+            return
+            
+        self.sub_message = f"Found {len(csv_files)} sessions."
+        time.sleep(1)
+        
+        # 2. LOAD & MERGE
+        self.status_message = "Loading & Merging sessions..."
+        self.progress = 0.2
+        raw_list = []
+        
+        try:
+            for fname in csv_files:
+                try:
+                    df = pd.read_csv(fname, sep='\t', header=None)
+                except:
+                    df = pd.read_csv(fname, sep=',', header=None)
+                
+                # Check shape
+                if df.shape[1] < 24: continue
 
-# Check for valid classes
-print(f"Classes found: {np.unique(y)}")
+                eeg = df.iloc[:, 1:9].values.T * 1e-6
+                markers = df.iloc[:, 23].values
+                
+                info = mne.create_info(ch_names=CH_NAMES, sfreq=SFREQ, ch_types='eeg')
+                raw_tmp = mne.io.RawArray(eeg, info, verbose=False)
+                
+                # Add Stim channel for markers (MNE standard way to preserve markers in concat)
+                stim_info = mne.create_info(['STI'], SFREQ, ['stim'])
+                stim_raw = mne.io.RawArray(markers.reshape(1, -1), stim_info, verbose=False)
+                raw_tmp.add_channels([stim_raw], force_update_info=True)
+                
+                raw_list.append(raw_tmp)
+            
+            if not raw_list:
+                raise Exception("No valid data found in files")
+                
+            raw = mne.concatenate_raws(raw_list)
+            
+            # Extract markers back from Stim channel
+            events = mne.find_events(raw, stim_channel='STI', verbose=False)
+            
+            # Filter
+            raw.pick_types(eeg=True) # Drop stim for filtering
+            raw.notch_filter([50, 100], fir_design='firwin', verbose=False)
+            raw.filter(8., 30., fir_design='firwin', verbose=False)
+            
+        except Exception as e:
+            self.status_message = f"Error Loading: {str(e)[:20]}..."
+            print(e)
+            self.finished = True
+            self.success = False
+            return
 
-# ==========================================
-# 3. PREPROCESSING (Already filtered in preprocess_eeg.py)
-# ==========================================
-# Data is already bandpass filtered (8-30Hz) and epoched.
-# We proceed directly to Riemannian classification.
+        # 3. EPOCHING
+        self.status_message = "Extracting Epochs..."
+        self.progress = 0.5
+        
+        # Events are already extracted via find_events
+        # We need to map them. BrainFlow markers are integers.
+        # Check event codes in events array
+        
+        event_id = {'LEFT': 1, 'RIGHT': 2, 'FEET': 3, 'REST': 10}
+        # Filter events to only keep what we want
+        # mne.Epochs will ignore events not in event_id if we pass event_id
+        
+        try:
+            # IMPORTANT: Rest phase is only 2.0s long. We must stop before 2.0s to avoid Action overlap.
+            # Window 0.5s to 2.0s = 1.5s duration.
+            epochs = mne.Epochs(raw, events, event_id, tmin=0.5, tmax=2.0, 
+                               proj=False, baseline=None, verbose=False, preload=True)
+        except:
+            self.status_message = "Error: No valid markers found."
+            self.finished = True
+            self.success = False
+            return
+            
+        if len(epochs) < 5:
+            self.status_message = "Error: Not enough trials."
+            self.sub_message = f"Found only {len(epochs)} epochs."
+            self.finished = True
+            self.success = False
+            return
 
-# ==========================================
-# 4. RIEMANNIAN GEOMETRY PIPELINE
-# ==========================================
-# The "Magic" of this algorithm:
-# 1. Covariances: Converts time-series window -> Spatial Covariance Matrix (SCM)
-# 2. TangentSpace: Projects the curved SCM manifold to a flat Euclidean space
-# 3. Classifier: Standard Logistic Regression works great in Tangent Space
-clf = make_pipeline(
-    Covariances(estimator='lwf'), # 'lwf' (Ledoit-Wolf) is robust for low sample counts
-    TangentSpace(),
-    LogisticRegression(solver='lbfgs') 
-)
+        # 4. TRAINING
+        self.status_message = "Training Model..."
+        self.progress = 0.7
+        
+        try:
+            clf = make_pipeline(Covariances(estimator='lwf'), TangentSpace(), 
+                               LogisticRegression(solver='lbfgs', max_iter=1000))
+            
+            X_train = epochs.get_data()
+            y_train = epochs.events[:, -1]
+            clf.fit(X_train, y_train)
+            
+            self.accuracy = clf.score(X_train, y_train)
+            
+            # --- DEBUG INFO ---
+            from sklearn.metrics import classification_report, confusion_matrix
+            y_pred = clf.predict(X_train)
+            print("\n--- CLASSIFICATION REPORT ---")
+            print(classification_report(y_train, y_pred, target_names=[k for k in event_id.keys()]))
+            print("--- CONFUSION MATRIX ---")
+            print(confusion_matrix(y_train, y_pred))
+            print("-----------------------------\n")
 
-# Train the model
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
-clf.fit(X_train, y_train)
+            if not os.path.exists(MODELS_DIR):
+                os.makedirs(MODELS_DIR)
+            joblib.dump(clf, os.path.join(MODELS_DIR, "riemann_model.pkl"))
+            
+        except Exception as e:
+            self.status_message = f"Training Failed: {str(e)}"
+            self.finished = True
+            self.success = False
+            return
 
-print(f"Training Complete. Test Accuracy (on random noise): {clf.score(X_test, y_test):.2f}")
-print("Note: Accuracy is random here because input data is noise.")
+        self.status_message = "Training Complete!"
+        self.sub_message = f"Accuracy (on train set): {self.accuracy*100:.1f}%"
+        self.progress = 1.0
+        self.finished = True
+        self.success = True
 
-# ==========================================
-# 5. REAL-TIME SIMULATION
-# ==========================================
-def process_real_time_window(buffer_data):
-    """
-    Simulate receiving a 2-second buffer from the OpenBCI headset.
-    buffer_data shape: (n_channels, n_samples)
-    """
-    # 1. Reshape to (1, n_channels, n_samples) for the classifier
-    # In reality, you MUST apply the same bandpass filter (8-30Hz) here first!
-    epoch = buffer_data[np.newaxis, :, :]
-    
-    # 2. Predict
-    prediction = clf.predict(epoch)
-    
-    # 3. Map to Robot Command
-    command_map = {1: "ROBOT_MOVE_LEFT", 2: "ROBOT_MOVE_RIGHT", 3: "ROBOT_MOVE_FEET", 10: "ROBOT_REST"}
-    return command_map.get(prediction[0], "UNKNOWN")
+    def draw(self):
+        self.screen.fill(BG_COLOR)
+        
+        # Center Box
+        cx, cy = self.width // 2, self.height // 2
+        
+        # Status Text
+        status_surf = self.font.render(self.status_message, True, TEXT_COLOR)
+        status_rect = status_surf.get_rect(center=(cx, cy - 40))
+        self.screen.blit(status_surf, status_rect)
+        
+        # Sub Message
+        sub_surf = self.font_small.render(self.sub_message, True, (150, 150, 150))
+        sub_rect = sub_surf.get_rect(center=(cx, cy))
+        self.screen.blit(sub_surf, sub_rect)
+        
+        # Progress Bar
+        bar_w = 400
+        bar_h = 10
+        pygame.draw.rect(self.screen, (40, 40, 50), (cx - bar_w//2, cy + 40, bar_w, bar_h), border_radius=5)
+        
+        fill_w = int(self.progress * bar_w)
+        if fill_w > 0:
+            col = SUCCESS_COLOR if self.success else ACCENT_COLOR
+            if self.finished and not self.success: col = ERROR_COLOR
+            pygame.draw.rect(self.screen, col, (cx - bar_w//2, cy + 40, fill_w, bar_h), border_radius=5)
+            
+        # Instruction
+        if self.finished:
+            instr = "Press SPACE to Close"
+            instr_surf = self.font_small.render(instr, True, (100, 100, 100))
+            instr_rect = instr_surf.get_rect(center=(cx, self.height - 30))
+            self.screen.blit(instr_surf, instr_rect)
 
-# Save the model
-import joblib
-import os
-if not os.path.exists('../models'):
-    os.makedirs('../models')
-    
-model_path = '../models/riemann_model.pkl'
-joblib.dump(clf, model_path)
-print(f"Model saved to {model_path}")
+    def run(self):
+        running = True
+        while running:
+            self.draw()
+            pygame.display.flip()
+            self.clock.tick(60)
+            
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    running = False
+                if event.type == pygame.KEYDOWN:
+                    if self.finished:
+                        running = False
+        
+        pygame.quit()
 
-# Simulate a "live" buffer coming from the headset
-print("\n--- Simulating Real-Time Input ---")
-live_buffer = np.random.randn(n_channels, int(2.0 * SFREQ)) # 2 seconds of new data
-command = process_real_time_window(live_buffer)
-print(f"Detected Intention: {command}")
+if __name__ == "__main__":
+    app = TrainingGUI()
+    app.run()

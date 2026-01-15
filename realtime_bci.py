@@ -233,28 +233,56 @@ def main():
         # --- 3. UI DRAWING ---
         
         # SIGNALS (Left)
+        # Draw 8 channels vertically
+        x_sig, y_sig, w_sig, h_sig = 50, 50, 800, 70
         for i in range(8):
+            # Draw trace
+            draw_signal_trace(screen, clean_buffer[i], x_sig, y_sig + i * (h_sig + 10), w_sig, h_sig, scale=scale_uV, color=ACCENT_COLOR)
+            # Draw label
+            label = font_medium.render(CH_NAMES[i], True, (120, 120, 120))
+            screen.blit(label, (x_sig - 40, y_sig + i * (h_sig + 10) + 20))
+
+        # RESULTS (Right Panel)
+        fx = 900
+        
+        # State Display
+        screen.blit(font_header.render("ETAT ACTUEL:", True, TEXT_COLOR), (fx, 50))
+        
+        if "REPOS" in state_rest:
+            current_state = state_rest
+            state_col = REST_COLOR
+        else:
+            current_state = state_motor
+            state_col = ACTIVE_COLOR
+            
+        screen.blit(font_large.render(current_state, True, state_col), (fx, 90))
+
+        # Probabilities
         y_bar = 250
+        classes = ["Gauche", "Droite", "Pieds"]
+        current_probs = probs_motor
+        font_small = pygame.font.SysFont("Arial", 18)
+
         for i, cls in enumerate(classes):
             prob = current_probs[i]
             
             name_txt = font_medium.render(cls, True, TEXT_COLOR)
-            screen.blit(name_txt, (fx + 20, y_bar))
+            screen.blit(name_txt, (fx, y_bar))
             
             # Bar bg
-            pygame.draw.rect(screen, (40, 40, 60), (fx + 150, y_bar + 5, 300, 20))
+            pygame.draw.rect(screen, (40, 40, 60), (fx + 120, y_bar + 5, 250, 20))
             # Bar fg
-            bar_w = int(300 * prob)
-            pygame.draw.rect(screen, ACCENT_COLOR, (fx + 150, y_bar + 5, bar_w, 20))
+            bar_w = int(250 * prob)
+            pygame.draw.rect(screen, ACCENT_COLOR, (fx + 120, y_bar + 5, bar_w, 20))
             
             perc_txt = font_small.render(f"{prob*100:.1f}%", True, TEXT_COLOR)
-            screen.blit(perc_txt, (fx + 460, y_bar + 5))
+            screen.blit(perc_txt, (fx + 380, y_bar + 5))
             
             y_bar += 60
             
         # Info
-        info_txt = font_small.render(f"Scale: {scale_uV:.1f} uV | Filter: {'ON' if show_filtered else 'OFF'}", True, (150, 150, 150))
-        screen.blit(info_txt, (fx + 20, 600))
+        info_txt = font_small.render(f"Scale: {scale_uV:.1f} uV", True, (150, 150, 150))
+        screen.blit(info_txt, (fx, 600))
 
         pygame.display.flip()
         clock.tick(30)

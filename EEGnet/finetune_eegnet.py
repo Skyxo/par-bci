@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.utils.class_weight import compute_class_weight
+
 import os
 import glob
 import sys
@@ -19,7 +21,12 @@ from pretrain_eegnet import EEGNet
 # Configuration
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
-WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), "eegnet_physionet_weights.pth")
+MODEL_SOURCE = "Physionet 4-Class (Left, Right, Feet, Rest)"
+
+# PRE-TRAINED MODEL CONFIGURATION
+# ⚠️ UPDATE THIS PATH TO YOUR SPECIFIC PRE-TRAINING RUN ⚠️
+# Example: os.path.join(BASE_DIR, "EEGnet", "runs", "pretrain_2026-01-28_12-00-00", "eegnet_physionet_weights.pth")
+WEIGHTS_FILE = os.path.join(os.path.dirname(__file__), "eegnet_physionet_weights.pth") # Default fallback
 SFREQ = 250
 CH_NAMES = ['FC3', 'FC4', 'CP3', 'Cz', 'C3', 'C4', 'Pz', 'CP4']
 
@@ -63,10 +70,9 @@ def load_all_sessions():
         y = np.concatenate(y_list)
 
         # MAPPINGS: 1(L), 2(R), 3(F), 10(Rest)
-        # We filter to keep only ACTIVE classes (1, 2, 3)
-        # Marker 10 (Rest) is excluded as per recent decision to focus on active tasks
+        # We filter to keep only ACTIVE classes (1, 2, 3) + Rest (10)
         
-        mask_valid = (y == 1) | (y == 2) | (y == 3)
+        mask_valid = (y == 1) | (y == 2) | (y == 3) | (y == 10)
         X = X[mask_valid]
         y = y[mask_valid]
         
@@ -74,6 +80,7 @@ def load_all_sessions():
         y_new[y == 1] = 0 # Left
         y_new[y == 2] = 1 # Right
         y_new[y == 3] = 2 # Feet
+        y_new[y == 10] = 3 # Rest (NEW)
         y = y_new
         
         # Trim time dimension to match Fixed Input Size (750)
@@ -91,6 +98,59 @@ def load_all_sessions():
         import traceback
         traceback.print_exc()
         return None, None
+
+def train_epoch(model, loader, criterion, optimizer, device):
+    model.train()
+    total_loss = 0
+    correct = 0
+    total = 0
+    all_preds = []
+    all_targets = []
+    
+    for inputs, labels in loader:
+        inputs, labels = inputs.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        _, predicted = torch.max(outputs.data, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+        
+        all_preds.extend(predicted.cpu().numpy())
+        all_targets.extend(labels.cpu().numpy())
+        
+    avg_loss = total_loss / len(loader)
+    acc = 100 * correct / total
+    return avg_loss, acc
+
+def evaluate(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    correct = 0
+    total = 0
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for inputs, labels in loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_targets.extend(labels.cpu().numpy())
+            
+    avg_loss = total_loss / len(loader) if len(loader) > 0 else 0
+    acc = 100 * correct / total if total > 0 else 0
+    return avg_loss, acc
 
 def main():
     print("=== EEGNet FINE-TUNING (Transfer Learning) ===")
@@ -117,167 +177,172 @@ def main():
     # Reshape for PyTorch: (N, 1, Chans, Time)
     X = X[:, np.newaxis, :, :]
     
-    print(f"✅ Data Ready: {X.shape} samples. Classes: {np.unique(y, return_counts=True)}")
+    # Data Validation
+    unique, counts = np.unique(y, return_counts=True)
+    print(f"✅ Data Ready: {X.shape} samples. Classes: {unique} (Counts: {counts})")
     
-    # 2. Load Pre-Trained Model
+    # COMPUTE CLASS WEIGHTS
+    class_weights = compute_class_weight('balanced', classes=unique, y=y)
+    class_weights_tensor = torch.Tensor(class_weights)
+    print(f"⚖️ Class Weights: {class_weights}")
+    
+    # 2. Load Pre-Trained Model (Target: 4 Classes)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # CHANGED TO 3 CLASSES
-    model = EEGNet(nb_classes=3, Chans=8, Samples=750).to(device) 
+    print(f"training on {device}")
     
+    model = EEGNet(nb_classes=4, Chans=8, Samples=750).to(device) 
+    
+    # Check if weights file exists
     if os.path.exists(WEIGHTS_FILE):
-        print("✅ Loading Physionet Weights...")
+        print(f"✅ Loading Pre-trained Weights from: {WEIGHTS_FILE}")
         try:
-            # We must handle the mismatch of the final layer (3 classes vs 4 classes)
             state = torch.load(WEIGHTS_FILE)
             model_state = model.state_dict()
+            pretrained_dict = {k: v for k, v in state.items() if k in model_state and v.size() == model_state[k].size()}
+            model.load_state_dict(pretrained_dict, strict=False)
             
-            # Filter out mismatching keys
-            state = {k: v for k, v in state.items() if k in model_state and v.size() == model_state[k].size()}
+            if 'fc.bias' in pretrained_dict:
+                print(f"   ✅ Perfect Match! Loaded 4-class Pre-trained Weights.")
+            else:
+                print(f"   ⚠️ Class mismatch. Loaded feature extractor only. Final layer reset.")
             
-            model.load_state_dict(state, strict=False)
-            print("   (Partial load successful - Classification layer reset)")
-        except RuntimeError:
-            print("⚠️ Weights mismatch too severe. Training from scratch.")
+        except RuntimeError as e:
+            print(f"⚠️ Error loading weights: {e}")
+            print("Training from scratch.")
     else:
         print("⚠️ No pre-trained weights found. Training from scratch.")
 
-    # 3. UNFREEZE ALL LAYERS (Full Fine-Tuning)
-    print("🔓 Unfreezing all layers allow full adaptation (Low LR)...")
-    for param in model.parameters():
-        param.requires_grad = True
-    
-    # 4. Train/Val Split
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)
+    # 4. Train/Val Split (Stratified)
+    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     
     train_dataset = TensorDataset(torch.Tensor(X_train), torch.LongTensor(y_train))
     val_dataset = TensorDataset(torch.Tensor(X_val), torch.LongTensor(y_val))
     
-    loader = DataLoader(train_dataset, batch_size=8, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=8, shuffle=False)
+    # INCREASED BATCH SIZE
+    BATCH_SIZE = 16
+    loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    criterion = nn.CrossEntropyLoss()
-    # LOWER LEARNING RATE for full fine-tuning
-    # LOWER LEARNING RATE for full fine-tuning
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    criterion = nn.CrossEntropyLoss(weight=class_weights_tensor.to(device))
     
-    # SCHEDULER: Reduce LR if Val Loss plateaus
-    from torch.optim.lr_scheduler import ReduceLROnPlateau
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6)
+    # HISTORY TRACKING
+    history = {
+        'train_loss': [], 'val_loss': [],
+        'train_acc': [], 'val_acc': []
+    }
     
-    print("Fine-tuning on User Data (Full Network)...")
-    
-    train_losses = []
-    val_losses = []
-    train_accs = []
-    val_accs = []
-    
-    best_val_acc = 0.0
-    best_val_acc = 0.0
+    best_val_bal_acc = 0.0
     best_epoch = -1
-    best_model_path = os.path.join(run_dir, "eegnet_best.pth")
-
     best_model_path = os.path.join(MODELS_DIR, "eegnet_best.pth")
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    
+    # ------------------------------------------------------------------
+    # PHASE 1: FROZEN FEATURE EXTRACTOR (Warmup)
+    # ------------------------------------------------------------------
+    print("\n❄️ PHASE 1: FREEZING FEATURES (Training Classifier Only)...")
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    # Unfreeze only the classification layer (dense)
+    for param in model.dense.parameters():
+        param.requires_grad = True
+        
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    WARMUP_EPOCHS = 20
+    for epoch in range(WARMUP_EPOCHS):
+        t_loss, t_acc = train_epoch(model, loader, criterion, optimizer, device)
+        v_loss, v_acc = evaluate(model, val_loader, criterion, device)
+        
+        history['train_loss'].append(t_loss)
+        history['val_loss'].append(v_loss)
+        history['train_acc'].append(t_acc)
+        history['val_acc'].append(v_acc)
+        
+        print(f"[Warmup {epoch+1}/{WARMUP_EPOCHS}] Loss: {t_loss:.3f} | Acc: {t_acc:.1f}% | Val Loss: {v_loss:.3f} | Val Acc: {v_acc:.1f}%")
 
-    n_epochs = 500
-    for epoch in range(n_epochs):
-        # TRAIN
-        model.train()
-        total_loss = 0
-        correct = 0
-        total = 0
+    # ------------------------------------------------------------------
+    # PHASE 2: FINE-TUNING (All Layers)
+    # ------------------------------------------------------------------
+    print("\n🔓 PHASE 2: UNFREEZING ALL LAYERS (Fine-Tuning)...")
+    for param in model.parameters():
+        param.requires_grad = True
         
-        for inputs, labels in loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            
-        epoch_loss = total_loss/len(loader)
-        epoch_acc = 100*correct/total
-        train_losses.append(epoch_loss)
-        train_accs.append(epoch_acc)
-        
-        # VALIDATE
-        model.eval()
-        val_loss = 0
-        val_correct = 0
-        val_total = 0
-        with torch.no_grad():
-             for inputs, labels in val_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                val_loss += loss.item()
-                _, predicted = torch.max(outputs.data, 1)
-                val_total += labels.size(0)
-                val_correct += (predicted == labels).sum().item()
-        
-        val_epoch_loss = val_loss/len(val_loader) if len(val_loader) > 0 else 0
-        val_epoch_acc = 100*val_correct/val_total if val_total > 0 else 0
-        val_losses.append(val_epoch_loss)
-        val_accs.append(val_epoch_acc)
-        
-        # UPDATE SCHEDULER
-        scheduler.step(val_epoch_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        
-        print(f"Epoch {epoch+1}/{n_epochs} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.1f}% | Val Loss: {val_epoch_loss:.4f} | Val Acc: {val_epoch_acc:.1f}% | LR: {current_lr:.1e}")
+    # Lower Learning Rate for Fine-tuning
+    optimizer = optim.Adam(model.parameters(), lr=0.0001) 
+    
+    # Scheduler: Monitor Val Loss instead of Acc
+    from torch.optim.lr_scheduler import ReduceLROnPlateau
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-6, verbose=True)
+    
+    patience = 30 # Increased patience for long training
+    trigger_times = 0
+    n_epochs = 1000 # Increased to 1000 as requested
+    
+    best_val_loss = float('inf')
 
-        # SAVE BEST MODEL (Based on ACCURACY)
-        if val_epoch_acc > best_val_acc:
-            best_val_acc = val_epoch_acc
-            best_epoch = epoch + 1
-            torch.save(model.state_dict(), best_model_path)
-            print(f"  -> ⭐ New Best Val Acc! Saved to eegnet_best.pth")
-
-        # ==========================================
-        # LIVE PLOTTING (Every Epoch)
-        # ==========================================
-        plt.figure(figsize=(10, 5))
-        
-        plt.subplot(1, 2, 1)
-        plt.plot(range(1, len(train_losses)+1), train_losses, label='Train', marker='o', color='red', alpha=0.6)
-        plt.plot(range(1, len(val_losses)+1), val_losses, label='Val', marker='x', color='orange')
-        # Mark Best
-        if best_epoch != -1:
-            # We want to show where the best model (by Accuracy) is located on the Loss graph
-            loss_at_best = val_losses[best_epoch-1]
-            plt.plot(best_epoch, loss_at_best, marker='*', color='purple', markersize=15, label=f'Best Acc: Ep {best_epoch}')
-        
-        plt.title(f'Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.grid(True)
-        
-        plt.subplot(1, 2, 2)
-        plt.plot(range(1, len(train_accs)+1), train_accs, label='Train', marker='o', color='green', alpha=0.6)
-        plt.plot(range(1, len(val_accs)+1), val_accs, label='Val', marker='x', color='blue')
-        # Mark Best
-        if best_epoch != -1:
-            plt.plot(best_epoch, best_val_acc, marker='*', color='purple', markersize=15, label=f'Best: {best_val_acc:.1f}%')
+    try:
+        for epoch in range(n_epochs):
+            t_loss, t_acc = train_epoch(model, loader, criterion, optimizer, device)
+            v_loss, v_acc = evaluate(model, val_loader, criterion, device)
             
-        plt.title(f'Accuracy (Best: {best_val_acc:.1f}%)')
-        plt.xlabel('Epoch')
-        plt.ylabel('Accuracy (%)')
-        plt.legend()
-        plt.grid(True)
-        
-        plt.tight_layout()
-        save_path = os.path.join(run_dir, 'finetune_results.png')
-        plt.savefig(save_path)
-        plt.close()
-        
-        if False: # Early stopping removed
-            print(f"� Early stopping! No improvement for {patience} epochs.")
-            break
+            history['train_loss'].append(t_loss)
+            history['val_loss'].append(v_loss)
+            history['train_acc'].append(t_acc)
+            history['val_acc'].append(v_acc)
+            
+            # Step Scheduler on Loss
+            scheduler.step(v_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            print(f"Epoch {epoch+1}/{n_epochs} | Loss: {t_loss:.4f} | Acc: {t_acc:.1f}% | Val Loss: {v_loss:.4f} | Val Acc: {v_acc:.1f}% | LR: {current_lr:.1e}")
+
+            # SAVE BEST MODEL (Based on VAL LOSS - Early Stopping)
+            if v_loss < best_val_loss:
+                best_val_loss = v_loss
+                best_epoch = len(history['val_loss']) # Correct global epoch count
+                torch.save(model.state_dict(), best_model_path)
+                print(f"  -> ⭐ New Best Val Loss! Saved to eegnet_best.pth")
+                trigger_times = 0
+            else:
+                trigger_times += 1
+                print(f"  -> No improvement ({trigger_times}/{patience})")
+
+            # PLOTTING
+            plt.figure(figsize=(10, 5))
+            
+            # Loss
+            plt.subplot(1, 2, 1)
+            plt.plot(history['train_loss'], label='Train', color='red', alpha=0.6)
+            plt.plot(history['val_loss'], label='Val', color='orange')
+            if best_epoch != -1:
+                 plt.plot(best_epoch-1, best_val_loss, marker='*', color='purple', markersize=15, label=f'Best: {best_val_loss:.4f}')
+            plt.title(f'Loss (Best: {best_val_loss:.4f})')
+            plt.legend()
+            plt.grid(True)
+            plt.axvline(x=WARMUP_EPOCHS, color='black', linestyle='--', alpha=0.5, label='Phase 2 Start')
+
+            # Accuracy
+            plt.subplot(1, 2, 2)
+            plt.plot(history['train_acc'], label='Train', color='green', alpha=0.6)
+            plt.plot(history['val_acc'], label='Val', color='blue')
+            plt.title('Accuracy')
+            plt.legend()
+            plt.grid(True)
+            plt.axvline(x=WARMUP_EPOCHS, color='black', linestyle='--', alpha=0.5)
+            
+            plt.tight_layout()
+            save_path = os.path.join(run_dir, 'finetune_results.png')
+            plt.savefig(save_path)
+            plt.close()
+            
+            if trigger_times >= patience:
+                print(f"🛑 Early stopping! No improvement for {patience} epochs.")
+                break
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️ INTERRUPTED BY USER (Ctrl+C)")
+        print("   Saving current state before exiting...")
 
     # Save Fine-Tuned Model (Final state)
     user_model_path = os.path.join(run_dir, "eegnet_user.pth")

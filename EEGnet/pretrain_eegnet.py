@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 from mne.datasets import eegbci
 import os
 import matplotlib.pyplot as plt
@@ -73,10 +74,11 @@ class EEGNet(nn.Module):
         return x
 
 def main():
-    print("=== EEGNet PRE-TRAINING (Physionet) ===")
+    print("=== EEGNet PRE-TRAINING (Physionet 4-Class) ===")
     
     # CACHE PATH
-    CACHE_FILE = os.path.join(os.path.dirname(__file__), "physionet_cache_v2.npz")
+    # DATASET (Frozen 4-Class)
+    CACHE_FILE = os.path.join(os.path.dirname(__file__), "PRETRAIN_DATABASE_4CLASS.npz")
     
     # OUTPUT DIRS
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -85,13 +87,13 @@ def main():
     print(f"📂 Output Directory: {run_dir}")
     
     if os.path.exists(CACHE_FILE):
-        print(f"🚀 Loading Cached Data from {CACHE_FILE}...")
+        print(f"🚀 Loading FROZEN Database from {CACHE_FILE}...")
         data = np.load(CACHE_FILE)
         X = data['X']
         y = data['y']
     else:
-        print(f"❌ Cache not found: {CACHE_FILE}")
-        print("   Please run 'python tools/cache_physionet.py' first to build the dataset.")
+        print(f"❌ Database not found: {CACHE_FILE}")
+        print("   Please run 'python tools/build_physionet_4class.py' first.")
         return
     
     # Validation of shape
@@ -118,7 +120,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on: {device}")
     
-    model = EEGNet(nb_classes=3, Chans=8, Samples=750).to(device)
+    # 4 CLASSES NOW
+    model = EEGNet(nb_classes=4, Chans=8, Samples=750).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
@@ -127,92 +130,131 @@ def main():
     scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6)
     
     n_epochs = 1000
-    train_losses = []
-    val_losses = []
+    train_losses, val_losses = [], []
+    train_accs, val_accs = [], []
+    train_bal_accs, val_bal_accs = [], []
+    
     best_val_loss = float('inf')
     best_epoch = -1
-    
-    # Early Stopping
-    patience = 20
+    patience = 1000
     trigger_times = 0
     
-    for epoch in range(n_epochs):
-        # TRAIN
-        model.train()
-        running_loss = 0.0
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            running_loss += loss.item()
-        
-        train_loss = running_loss/len(train_loader)
-        train_losses.append(train_loss)
-        
-        # VALIDATION
-        model.eval()
-        val_running_loss = 0.0
-        with torch.no_grad():
-            for inputs, labels in test_loader:
+    try:
+        for epoch in range(n_epochs):
+            # TRAIN
+            model.train()
+            running_loss = 0.0
+            all_preds = []
+            all_targets = []
+            
+            for inputs, labels in train_loader:
                 inputs, labels = inputs.to(device), labels.to(device)
+                optimizer.zero_grad()
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
-                val_running_loss += loss.item()
-        
-        val_loss = val_running_loss/len(test_loader)
-        val_losses.append(val_loss)
-        
-        # UPDATE SCHEDULER
-        scheduler.step(val_loss)
-        current_lr = optimizer.param_groups[0]['lr']
-        
-        print(f"Epoch {epoch+1}/{n_epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {current_lr:.1e}")
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item()
+                
+                _, predicted = torch.max(outputs.data, 1)
+                all_preds.extend(predicted.cpu().numpy())
+                all_targets.extend(labels.cpu().numpy())
+            
+            train_loss = running_loss/len(train_loader)
+            train_acc = 100 * accuracy_score(all_targets, all_preds)
 
-        # Save Best Model & Early Stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_epoch = epoch + 1
-            best_epoch = epoch + 1
-            best_model_path = os.path.join(run_dir, "eegnet_physionet_best.pth")
-            torch.save(model.state_dict(), best_model_path)
-            print(f"  -> ⭐ New Best Val Loss! Saved to {best_model_path}")
-            torch.save(model.state_dict(), best_model_path)
-            print(f"  -> ⭐ New Best Val Loss! Saved to eegnet_physionet_best.pth")
+            train_losses.append(train_loss)
+            train_accs.append(train_acc)
             
-        # ==========================================
-        # LIVE PLOTTING (Every Epoch)
-        # ==========================================
-        plt.figure()
-        plt.plot(range(1, len(train_losses)+1), train_losses, label='Train Loss', marker='o', alpha=0.6)
-        plt.plot(range(1, len(val_losses)+1), val_losses, label='Val Loss', marker='x')
-        
-        # Mark Best
-        if best_epoch != -1:
-            plt.plot(best_epoch, best_val_loss, marker='*', color='purple', markersize=15, label=f'Best: Ep {best_epoch}')
+            # VALIDATION
+            model.eval()
+            val_running_loss = 0.0
+            val_preds = []
+            val_targets = []
             
-        plt.title(f'Pre-training Loss (Best: {best_val_loss:.4f} @ Ep {best_epoch})')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.grid(True)
-        plt.legend()
-        plt.grid(True)
-        save_path = os.path.join(run_dir, 'pretrain_loss.png')
-        plt.savefig(save_path)
-        plt.close() # Close to free memory
-        plt.savefig(save_path)
-        plt.close() # Close to free memory
+            with torch.no_grad():
+                for inputs, labels in test_loader:
+                    inputs, labels = inputs.to(device), labels.to(device)
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    val_running_loss += loss.item()
+                    
+                    _, predicted = torch.max(outputs.data, 1)
+                    val_preds.extend(predicted.cpu().numpy())
+                    val_targets.extend(labels.cpu().numpy())
+            
+            val_loss = val_running_loss/len(test_loader)
+            val_acc = 100 * accuracy_score(val_targets, val_preds)
+
+            val_losses.append(val_loss)
+            val_accs.append(val_acc)
+            
+            # UPDATE SCHEDULER
+            scheduler.step(val_loss)
+            current_lr = optimizer.param_groups[0]['lr']
+            
+            print(f"Epoch {epoch+1}/{n_epochs} | Loss: {train_loss:.4f} Acc: {train_acc:.1f}% | Val Loss: {val_loss:.4f} Acc: {val_acc:.1f}% | LR: {current_lr:.1e}")
+
+            # Save Best Model & Early Stopping
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_epoch = epoch + 1
+                best_model_path = os.path.join(run_dir, "eegnet_physionet_best.pth")
+                torch.save(model.state_dict(), best_model_path)
+                print(f"  -> ⭐ New Best Val Loss! Saved to {best_model_path}")
+                trigger_times = 0
+            else:
+                trigger_times += 1
+                print(f"  -> No improvement ({trigger_times}/{patience})")
+                
+            # ==========================================
+            # LIVE PLOTTING (Every Epoch)
+            # ==========================================
+            plt.figure(figsize=(10, 5))
+            
+            # Loss
+            plt.subplot(1, 2, 1)
+            plt.plot(range(1, len(train_losses)+1), train_losses, label='Train', marker='o', alpha=0.6)
+            plt.plot(range(1, len(val_losses)+1), val_losses, label='Val', marker='x')
+            if best_epoch != -1:
+                plt.plot(best_epoch, best_val_loss, marker='*', color='purple', markersize=15, label=f'Best: {best_val_loss:.4f}')
+            plt.title(f'Loss (Best: {best_val_loss:.4f})')
+            plt.legend()
+            plt.grid(True)
+            
+            # Accuracy
+            plt.subplot(1, 2, 2)
+            plt.plot(range(1, len(train_accs)+1), train_accs, label='Train', color='green', alpha=0.6)
+            plt.plot(range(1, len(val_accs)+1), val_accs, label='Val', color='blue')
+            plt.title('Accuracy')
+            plt.legend()
+            plt.grid(True)
+            
+            plt.tight_layout()
+            save_path = os.path.join(run_dir, 'pretrain_metrics.png')
+            plt.savefig(save_path)
+            plt.close() # Close to free memory
+            
+            # Check early stopping AFTER plotting so we capture the last state
+            if trigger_times >= patience:
+                print(f"🛑 Early stopping! No improvement for {patience} epochs.")
+                break
+                
+    except KeyboardInterrupt:
+        print("\n\n⚠️ INTERRUPTED BY USER (Ctrl+C)")
+        print("   Saving current state before exiting...")
         
-        # Check early stopping AFTER plotting so we capture the last state
-        # (EARLY STOPPING REMOVED BY USER REQUEST)
-        
-    # Save Final Weights (Optional)
+    # Save Final Weights (Run Directory)
     model_path = os.path.join(run_dir, "eegnet_physionet_weights.pth")
     torch.save(model.state_dict(), model_path)
     print(f"✅ Final Model saved to {model_path}")
+
+    # FINAL MESSAGE
+    print(f"\n✅ Pre-training Complete!")
+    print(f"   Shape: {X.shape}")
+    print(f"   Best Model: {best_model_path}")
+    print(f"   Final Model: {model_path}")
+    print(f"👉 To Finetune: Update 'WEIGHTS_FILE' in finetune_eegnet.py with the path above.")
 
 if __name__ == "__main__":
     main()

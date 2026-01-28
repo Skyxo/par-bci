@@ -11,9 +11,15 @@ echo "🚀 Starting Full Training Pipeline..."
 
 # 1. PREPARE DATA
 echo "------------------------------------------------"
-echo "📦 STEP 1: Process & Cache PhysioNet Data"
+# echo "📦 STEP 1: Process & Cache PhysioNet Data"
+# echo "------------------------------------------------"
+# (DISABLED: Using static PRETRAIN_DATABASE.npz)
+# python tools/cache_physionet.py
+
 echo "------------------------------------------------"
-python tools/cache_physionet.py
+echo "🛠️ STEP 1.5: Extract Epochs (4 Classes)"
+echo "------------------------------------------------"
+python tools/extract_epochs_4class.py
 
 # 2. PRE-TRAIN
 echo "------------------------------------------------"

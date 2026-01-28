@@ -1,208 +1,197 @@
-
 import numpy as np
-import pandas as pd
 import mne
 import matplotlib.pyplot as plt
 from pyriemann.estimation import Covariances
-from pyriemann.tangentspace import TangentSpace
-from pyriemann.utils.distance import distance_riemann
-from sklearn.pipeline import make_pipeline
-from sklearn.linear_model import LogisticRegression
+from pyriemann.classification import MDM
 from sklearn.model_selection import cross_val_score, StratifiedKFold
-from sklearn.metrics import confusion_matrix, accuracy_score, classification_report
-from sklearn.manifold import TSNE
-import seaborn as sns
-from scipy.signal import welch
-
 import os
+import glob
+import sys
 
-# Configuration
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TRAIN_FILE = os.path.join(BASE_DIR, "EEG_Session_2026-01-13_16-59.csv")
-TEST_FILE = os.path.join(BASE_DIR, "EEG_Session_2026-01-13_15-30.csv")
-SFREQ = 250
+# --- CONFIGURATION ---
 CH_NAMES = ['FC3', 'FC4', 'CP3', 'Cz', 'C3', 'C4', 'Pz', 'CP4']
+SFREQ = 250
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "audit_results")
+PROCESSED_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "processed_data")
 
-def load_data(filename):
-    print(f"Loading {filename}...")
-    try:
-        df = pd.read_csv(filename, sep='\t', header=None)
-        eeg = df.iloc[:, 1:9].values.T * 1e-6  # uV to V
-        markers = df.iloc[:, 23].values
-        
-        info = mne.create_info(ch_names=CH_NAMES, sfreq=SFREQ, ch_types='eeg')
-        raw = mne.io.RawArray(eeg, info, verbose=False)
-        return raw, markers
-    except Exception as e:
-        print(f"Error loading {filename}: {e}")
+def load_processed_data():
+    print(f"📥 Loading data from: {PROCESSED_DIR}")
+    X_files = glob.glob(os.path.join(PROCESSED_DIR, "X_*.npy"))
+    if not X_files:
+        print("❌ No .npy files found.")
         return None, None
 
-def check_signal_quality(raw, name="Dataset"):
-    print(f"\n--- Signal Quality Analysis: {name} ---")
-    data = raw.get_data() * 1e6 # Convert to uV for analysis
-    
-    # 1. Saturation (Railing)
-    # Check if values are close to typical hardware limits (e.g. +/- 187500 uV for some OpenBCI) or just very large
-    saturation_threshold = 1000 # uV, conservative threshold for "bad" artifact
-    pct_saturated = np.mean(np.abs(data) > saturation_threshold) * 100
-    print(f"Saturation (> {saturation_threshold} uV): {pct_saturated:.4f}%")
-    
-    # 2. 50Hz Noise (Mains hum)
-    n_per_seg = int(SFREQ * 2)
-    freqs, psd = welch(data, fs=SFREQ, nperseg=n_per_seg)
-    
-    # Find index for 50Hz (+/- 2Hz) and neighbor frequencies
-    idx_50 = np.where((freqs >= 48) & (freqs <= 52))[0]
-    idx_base = np.where(((freqs >= 40) & (freqs <= 45)) | ((freqs >= 55) & (freqs <= 60)))[0]
-    
-    power_50 = np.mean(psd[:, idx_50], axis=1)
-    power_base = np.mean(psd[:, idx_base], axis=1)
-    ratio_50 = power_50 / (power_base + 1e-9)
-    
-    print("50Hz Mains Noise Ratio (target < 10, warning > 100):")
-    for i, ch in enumerate(CH_NAMES):
-        status = "✅" if ratio_50[i] < 10 else "⚠️" if ratio_50[i] < 100 else "❌"
-        print(f"  {ch}: {ratio_50[i]:.1f} {status}")
-        
-    # 3. Overall Noise Level (RMS)
-    rms = np.sqrt(np.mean(data**2, axis=1))
-    print("Channel RMS Amplitude (uV) - High > 50uV, Low < 1uV:")
-    for i, ch in enumerate(CH_NAMES):
-        status = "✅" if 1 < rms[i] < 50 else "❌"
-        print(f"  {ch}: {rms[i]:.1f} {status}")
+    X_list = []
+    y_list = []
 
-    return data
+    for f in X_files:
+        base = os.path.basename(f).replace("X_", "y_")
+        y_f = os.path.join(PROCESSED_DIR, base)
+        
+        if os.path.exists(y_f):
+            X_part = np.load(f)
+            y_part = np.load(y_f)
+            X_list.append(X_part)
+            y_list.append(y_part)
 
-def analyze_epochs(raw, markers, name="Dataset"):
-    print(f"\n--- Epochs Analysis: {name} ---")
-    
-    # Create events
-    diff_markers = np.diff(markers, prepend=0)
-    events_idx = np.where(np.isin(markers, [1, 2, 3, 10]) & (diff_markers != 0))[0]
-    events_vals = markers[events_idx].astype(int)
-    events = np.column_stack((events_idx, np.zeros_like(events_idx), events_vals))
-    
-    event_id = {'GAUCHE': 1, 'DROITE': 2, 'PIEDS': 3, 'REPOS': 10}
-    
-    # Filter for epoching
-    raw_filt = raw.copy().filter(8., 30., fir_design='firwin', verbose=False)
-    
-    epochs = mne.Epochs(raw_filt, events, event_id, tmin=0.5, tmax=3.5, 
-                        proj=False, baseline=None, verbose=False, preload=True)
-    
-    print(f"Total Epochs: {len(epochs)}")
-    counts = epochs.events[:, -1]
-    for label, code in event_id.items():
-        count = np.sum(counts == code)
-        print(f"  {label}: {count}")
-        
-    return epochs
+    if not X_list: return None, None
+    X = np.concatenate(X_list)
+    y = np.concatenate(y_list)
+    return X, y
 
-def analyze_separability(epochs_train, epochs_test):
-    print("\n--- Class Separability Analysis (Riemannian Geometry) ---")
+def check_signal_quality(X, ch_names, sfreq):
+    """Checks for dead channels, rails, and line noise."""
+    print("\n🔍 --- 1. SIGNAL QUALITY AUDIT ---")
     
-    cov_est = Covariances(estimator='lwf')
-    cov_train = cov_est.fit_transform(epochs_train.get_data())
+    # 1. Global RMS Amplitude
+    # X shape: (Epochs, Channels, Time)
+    # Concatenate all epochs to get continuous-like signal for stats
+    X_cont = np.hstack(X) # (Channels, TotalTime)
     
-    ts = TangentSpace()
-    X_train_ts = ts.fit_transform(cov_train)
-    y_train = epochs_train.events[:, -1]
+    rms_per_ch = np.sqrt(np.mean(X_cont**2, axis=1))
     
-    # t-SNE Visualization
-    print("Computing t-SNE...")
-    tsne = TSNE(n_components=2, random_state=42)
-    X_embedded = tsne.fit_transform(X_train_ts)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(ch_names, rms_per_ch * 1e6) # Convert to uV
+    ax.set_ylabel("RMS Amplitude (uV)")
+    ax.set_title("Average Signal Amplitude per Channel\n(Normal range: 5-100 uV)")
+    ax.axhline(y=1.0, color='r', linestyle='--', label='Dead Channel (<1uV)')
+    ax.axhline(y=100.0, color='orange', linestyle='--', label='Noisy (>100uV)')
+    ax.legend()
     
-    plt.figure(figsize=(10, 8))
-    sns.scatterplot(x=X_embedded[:, 0], y=X_embedded[:, 1], hue=y_train, palette='viridis', legend='full')
-    plt.title('t-SNE of Training Data (Tangent Space)')
-    plt.savefig('bci_tsne_train.png')
-    print("Saved t-SNE plot to 'bci_tsne_train.png'")
+    # Color coding
+    for bar, val in zip(bars, rms_per_ch * 1e6):
+        if val < 1.0: bar.set_color('red') # Dead
+        elif val > 100.0: bar.set_color('orange') # Noisy
+        else: bar.set_color('green') # OK
+
+    plt.savefig(os.path.join(OUTPUT_DIR, "diagnostic_amplitude.png"))
+    plt.close()
     
-    # Model Performance
-    print("\n--- Model Evaluation ---")
-    clf = make_pipeline(Covariances(estimator='lwf'), TangentSpace(), LogisticRegression(solver='lbfgs', max_iter=1000))
+    print("   -> Generated 'diagnostic_amplitude.png'")
     
-    # CV on Train
-    scores = cross_val_score(clf, epochs_train.get_data(), y_train, cv=5)
-    print(f"Cross-Validation Accuracy (Train): {scores.mean():.4f} (+/- {scores.std() * 2:.4f})")
+    # 2. PSD Check (50Hz line noise)
+    # Using MNE Raw for PSD calculation
+    info = mne.create_info(ch_names, sfreq, 'eeg')
+    raw = mne.io.RawArray(X_cont, info, verbose=False)
     
-    # Train and Test
-    clf.fit(epochs_train.get_data(), y_train)
-    
-    if epochs_test:
-        y_test = epochs_test.events[:, -1]
-        y_pred = clf.predict(epochs_test.get_data())
+    fig_psd = raw.compute_psd(fmax=60).plot(show=False)
+    plt.savefig(os.path.join(OUTPUT_DIR, "diagnostic_psd.png"))
+    plt.close()
+    print("   -> Generated 'diagnostic_psd.png' (Check for 50Hz peak)")
+
+    # Report text
+    bad_chans = []
+    for i, val in enumerate(rms_per_ch * 1e6):
+        status = "OK"
+        if val < 1.0: status = "DEAD/FLAT"
+        if val > 100.0: status = "NOISY"
+        print(f"   - {ch_names[i]:<5}: {val:.2f} uV [{status}]")
+        if status != "OK": bad_chans.append(ch_names[i])
         
-        test_acc = accuracy_score(y_test, y_pred)
-        print(f"Test Set Accuracy: {test_acc:.4f}")
-        
-        print("\nClassification Report (Test):")
-        print(classification_report(y_test, y_pred, target_names=['GAUCHE (1)', 'DROITE (2)', 'PIEDS (3)', 'REPOS (10)']))
-        
-        cm = confusion_matrix(y_test, y_pred)
-        plt.figure(figsize=(8, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                    xticklabels=['G', 'D', 'P', 'R'], 
-                    yticklabels=['G', 'D', 'P', 'R'])
-        plt.title('Confusion Matrix (Test Set)')
-        plt.xlabel('Predicted')
-        plt.ylabel('Ground Truth')
-        plt.savefig('bci_confusion_matrix.png')
-        print("Saved confusion matrix to 'bci_confusion_matrix.png'")
-        
-        # Check Distribution Shift (Covariate Shift) simply by comparing mean covariance distances?
-        # A simple check: compare accuracy trends or visual inspection of t-SNE if we projected test data too.
-        
-        # Project Test data for t-SNE overlay
-        mask_good_events = np.isin(epochs_test.events[:, -1], [1, 2, 3, 10])
-        if np.sum(mask_good_events) > 0:
-             cov_test = cov_est.fit_transform(epochs_test.get_data())
-             X_test_ts = ts.transform(cov_test)
-             
-             # Combine for drift visualization
-             X_combined = np.vstack((X_train_ts, X_test_ts))
-             y_combined = np.concatenate((y_train, y_test))
-             domain_labels = np.concatenate((['Train']*len(y_train), ['Test']*len(y_test)))
-             
-             tsne_drift = TSNE(n_components=2, random_state=42)
-             X_drift_emb = tsne_drift.fit_transform(X_combined)
-             
-             plt.figure(figsize=(12, 5))
-             
-             plt.subplot(1, 2, 1)
-             sns.scatterplot(x=X_drift_emb[:, 0], y=X_drift_emb[:, 1], hue=y_combined, palette='viridis', style=domain_labels)
-             plt.title('t-SNE: Class Distribution')
-             
-             plt.subplot(1, 2, 2)
-             sns.scatterplot(x=X_drift_emb[:, 0], y=X_drift_emb[:, 1], hue=domain_labels, palette='rocket')
-             plt.title('t-SNE: Domain Drift (Train vs Test)')
-             
-             plt.savefig('bci_drift_analysis.png')
-             print("Saved drift analysis to 'bci_drift_analysis.png'")
+    return bad_chans
+
+def compute_erds(epochs, tmin=1.0, tmax=3.0):
+    """Computes basic ERDS maps (Event-Related Desynchronization)."""
+    print("\n🧠 --- 2. BRAIN RESPONSE (ERDS) ---")
+    
+    freqs = np.arange(4, 30, 1)  # 4-30Hz (Theta, Alpha, Beta)
+    n_cycles = freqs / 2.0
+    
+    # Calculate TFR (Time Frequency Representation)
+    power = mne.time_frequency.tfr_morlet(
+        epochs, freqs=freqs, n_cycles=n_cycles, use_fft=True,
+        return_itc=False, decim=2, n_jobs=1, verbose=False
+    )
+    
+    # Scan for C3 and C4 indices
+    ch_map = {name: i for i, name in enumerate(epochs.info['ch_names'])}
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Helper to plot TFR
+    def plot_channel_tfr(ax, ch_name):
+        if ch_name not in ch_map:
+            ax.text(0.5, 0.5, f"{ch_name} not found", ha='center')
+            return
+            
+        # Plot power for the specific channel
+        # We baseline correct using the beginning of the epoch itself if necessary
+        # ideally we use a separate baseline period, but here we look for relative change
+        power.plot([ch_map[ch_name]], baseline=(0.0, 0.5), mode='percent', axes=ax, show=False, colorbar=True)
+        ax.set_title(f"Spectrogram: {ch_name}")
+    
+    plot_channel_tfr(axes[0], 'C3')
+    plot_channel_tfr(axes[1], 'C4')
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "diagnostic_erds.png"))
+    plt.close()
+    print("   -> Generated 'diagnostic_erds.png'")
+    print("      Look for BLUE spots (ERD) in 8-13Hz range during 1s-3s.")
+
+def check_separability(X, y):
+    """Riemannian Geometric Classifier Test."""
+    print("\n⚖️ --- 3. CLASS SEPARABILITY TEST ---")
+    
+    # Filter 8-30Hz (Broad Motor Band)
+    X_filt = mne.filter.filter_data(X, SFREQ, 8, 30, verbose=False)
+    
+    # Crop to active window [1s - 3.5s]
+    t_start, t_end = 1.0, 3.5
+    idx_s = int(t_start * SFREQ)
+    idx_e = int(t_end * SFREQ)
+    X_crop = X_filt[:, :, idx_s:idx_e]
+    
+    print(f"   Data shape used for ML: {X_crop.shape}")
+    
+    # Covariance
+    cov = Covariances(estimator='lwf').fit_transform(X_crop)
+    
+    # MDM Classifier (simplest, robust)
+    mdm = MDM()
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    
+    scores = cross_val_score(mdm, cov, y, cv=cv, n_jobs=1)
+    
+    mean_acc = np.mean(scores)
+    std_acc = np.std(scores)
+    n_classes = len(np.unique(y))
+    chance = 1.0 / n_classes
+    
+    print(f"   Classes found: {np.unique(y)}")
+    print(f"   Chance Level: {chance:.2%}")
+    print(f"   👉 5-Fold Cross-Val Accuracy: {mean_acc:.2%} (+/- {std_acc:.2%})")
+    
+    if mean_acc < chance + 0.10:
+        print("   ⚠️ WARNING: Accuracy is close to chance. The model cannot distinguish classes.")
+    else:
+        print("   ✅ PASS: Significant separability detected.")
 
 def main():
-    print("=== BCI SYSTEM DIAGNOSTICS ===\n")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    # 1. Load Data
-    raw_train, markers_train = load_data(TRAIN_FILE)
-    if raw_train is None: return
+    # 1. Load
+    X, y = load_processed_data()
+    if X is None: return
     
-    raw_test, markers_test = load_data(TEST_FILE)
-    if raw_test is None: return
+    # 2. Quality
+    bad_chans = check_signal_quality(X, CH_NAMES, SFREQ)
+    
+    # 3. ERDS (Create Epochs object for MNE tools)
+    info = mne.create_info(CH_NAMES, SFREQ, 'eeg')
+    info.set_montage('standard_1020')
+    events = np.column_stack((np.arange(len(y)), np.zeros(len(y), dtype=int), y.astype(int)))
+    epochs = mne.EpochsArray(X, info, events=events, tmin=0.0, verbose=False)
+    
+    compute_erds(epochs)
+    
+    # 4. Separability
+    check_separability(X, y)
 
-    # 2. Check Signal Quality
-    check_signal_quality(raw_train, "TRAIN SET")
-    check_signal_quality(raw_test, "TEST SET")
-    
-    # 3. Analyze Epochs
-    epochs_train = analyze_epochs(raw_train, markers_train, "TRAIN SET")
-    epochs_test = analyze_epochs(raw_test, markers_test, "TEST SET")
-    
-    # 4. Separability & Model
-    analyze_separability(epochs_train, epochs_test)
-    
-    print("\n=== DIAGNOSTICS COMPLETE ===")
+    if bad_chans:
+        print(f"\n🚨 DIAGNOSTIC RESULT: FAIL. Found bad channels: {bad_chans}")
+    else:
+        print("\n✅ DIAGNOSTIC RESULT: Signal physical quality looks OK. Check ERDS maps for biological validity.")
 
 if __name__ == "__main__":
     main()

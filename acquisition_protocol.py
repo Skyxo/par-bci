@@ -48,15 +48,21 @@ class BCIProtocol:
         
         self.board = BoardShim(self.board_id, self.params)
 
+        self.connected = False # Connection state flag
+        
     def init_hardware(self):
         try:
+            if self.board.is_prepared():
+                self.board.release_session()
             self.board.prepare_session()
             self.board.start_stream()
             print("--- FLUX EEG DÉMARRÉ ---")
+            self.connected = True
             time.sleep(2)
         except BrainFlowError as e:
-            print(f"ERREUR CRITIQUE: {e}")
-            self.running = False
+            print(f"ERREUR CONNEXION: {e}")
+            self.connected = False
+            # self.running = False # No longer kill app, just flag it
 
     def init_graphics(self):
         pygame.init()
@@ -121,11 +127,46 @@ class BCIProtocol:
         self.screen.blit(text, text_rect)
         pygame.display.flip()
 
+    def draw_text_screen(self, text_lines):
+        """Affiche un écran de texte multiline et attend."""
+        self.screen.fill(self.bg_color)
+        cx, cy = self.width // 2, self.height // 2
+        
+        # Start drawing from a bit higher up
+        start_y = cy - (len(text_lines) * 40) // 2
+        
+        for i, line in enumerate(text_lines):
+            # Render text
+            if i == 0 or "RUN" in line: # Title or Important
+                font = self.font
+                color = (255, 255, 0) # Yellow for titles
+                if "ERREUR" in line: color = (255, 50, 50) # Red for errors
+            else:
+                font = self.font_small
+                color = (255, 255, 255)
+            
+            text = font.render(line, True, color)
+            rect = text.get_rect(center=(cx, start_y + i * 40))
+            self.screen.blit(text, rect)
+            
+        pygame.display.flip()
+
     def run_experiment(self):
         self.init_hardware()
         self.init_graphics()
 
-        if not self.running: return
+        # LOOP UNTIL CONNECTED
+        while not self.connected:
+            self.draw_text_screen([
+                "ERREUR DE CONNEXION AU CASQUE",
+                "",
+                f"Port: {COM_PORT}",
+                "Vérifiez que le dongle est branché et le casque allumé.",
+                "",
+                "[ESPACE] : Réessayer la connexion",
+                "[ECHAP] : Quitter"
+            ])
+            if not self.wait_for_retry(): return
 
         self.draw_text_screen([
             "PROTOCOLE D'IMAGERIE MOTRICE - GRAZ ACTIVE REST",
@@ -220,6 +261,24 @@ class BCIProtocol:
                 if not self.wait_for_start(): return
 
         self.save_and_quit()
+
+    def wait_for_retry(self):
+        """Menu boucle pour réessayer la connexion"""
+        waiting = True
+        while waiting:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.save_and_quit()
+                    return False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        self.init_hardware() # Retry
+                        return True # Break loop to check self.connected
+                    if event.key == pygame.K_ESCAPE:
+                        self.save_and_quit()
+                        return False
+            time.sleep(0.05)
+        return True
 
     def wait_for_start(self):
         """Attend Espace pour continuer ou Echap pour quitter"""

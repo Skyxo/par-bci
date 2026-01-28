@@ -12,6 +12,7 @@ import sys
 # --- CONFIGURATION ---
 # Correspondance des canaux (Doit matcher preprocess_data_to_npy.py)
 CH_NAMES = ['FC3', 'FC4', 'CP3', 'Cz', 'C3', 'C4', 'Pz', 'CP4']
+DROP_CHANS = ['C3'] # User request: Test separate without C3
 SFREQ = 250
 
 # Dossier de sortie
@@ -57,6 +58,19 @@ def main():
     print(f"📊 Données brutes chargées : {X.shape} (N_epochs, N_chans, N_times)")
     print(f"ℹ️ Classes disponibles : {np.unique(y, return_counts=True)}")
 
+    # 1.5 DROPPING BAD CHANNELS (Ablation Study)
+    if DROP_CHANS:
+        print(f"✂️ ABLATION: Suppression des canaux {DROP_CHANS}")
+        # Find indices
+        keep_indices = [i for i, name in enumerate(CH_NAMES) if name not in DROP_CHANS]
+        new_ch_names = [CH_NAMES[i] for i in keep_indices]
+        
+        X = X[:, keep_indices, :]
+        print(f"   -> Nouvelle forme : {X.shape}")
+        current_ch_names = new_ch_names
+    else:
+        current_ch_names = CH_NAMES
+
     # 2. FILTRAGE SPECIFIQUE (Miroir de ultra_riemannian_training.py)
     # Les données .npy sont déjà filtrées 1-40Hz. 
     # Pour Riemann/Motor Imagery, on isole la bande Mu (8-13Hz).
@@ -78,16 +92,16 @@ def main():
 
     # 4. PREPARATION MNE (Pour Topomaps)
     # On crée une structure EpochsArray pour utiliser les outils de plot MNE
-    info = mne.create_info(CH_NAMES, SFREQ, 'eeg')
+    info = mne.create_info(current_ch_names, SFREQ, 'eeg')
     info.set_montage('standard_1020')
     
-    # On filtre uniquement Gauche (1) et Droite (2) pour la visualisation
-    mask_LR = np.isin(y, [1, 2])
-    X_viz = X_crop[mask_LR]
-    y_viz = y[mask_LR]
+    # On filtre Gauche (1), Droite (2) et Pieds (3)
+    mask_viz = np.isin(y, [1, 2, 3])
+    X_viz = X_crop[mask_viz]
+    y_viz = y[mask_viz]
     
     # Mapping labels -> Noms
-    event_id = {'Gauche': 1, 'Droite': 2}
+    event_id = {'Gauche': 1, 'Droite': 2, 'Pieds': 3}
     # Events array pour MNE : colonne 2 contient le label
     events = np.column_stack((np.arange(len(y_viz)), np.zeros(len(y_viz), dtype=int), y_viz.astype(int)))
     
@@ -100,7 +114,7 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
     try:
-        fig_topo, ax = plt.subplots(1, 2, figsize=(10, 4))
+        fig_topo, ax = plt.subplots(1, 3, figsize=(15, 4))
         
         # On définit explicitement la bande à afficher pour éviter que MNE ne cherche
         # à afficher les 5 bandes par défaut (Delta, Theta, ...) sur un seul axe.
@@ -108,10 +122,13 @@ def main():
 
         # Note: on a déjà filtré le signal (X_viz) en 8-13Hz, donc le PSD sera concentré là.
         epochs['Gauche'].compute_psd().plot_topomap(bands=bands, axes=ax[0], show=False, cmap='viridis')
-        ax[0].set_title("Pensée GAUCHE\n(Attendu: Bleu/Faible à DROITE C4)")
+        ax[0].set_title("Pensée GAUCHE\n(Attendu: Bleu/Faible à C4)")
         
         epochs['Droite'].compute_psd().plot_topomap(bands=bands, axes=ax[1], show=False, cmap='viridis')
-        ax[1].set_title("Pensée DROITE\n(Attendu: Bleu/Faible à GAUCHE C3)")
+        ax[1].set_title("Pensée DROITE\n(Attendu: Bleu/Faible à C3)")
+
+        epochs['Pieds'].compute_psd().plot_topomap(bands=bands, axes=ax[2], show=False, cmap='viridis')
+        ax[2].set_title("Pensée PIEDS\n(Attendu: Bleu/Faible à Cz)")
         
         plt.tight_layout()
         save_path = os.path.join(OUTPUT_DIR, 'riemann_topomaps.png')
@@ -144,9 +161,11 @@ def main():
         # Masques pour couleurs
         mask_g = (y_viz == 1)
         mask_d = (y_viz == 2)
+        mask_p = (y_viz == 3)
         
         plt.scatter(X_embedded[mask_g, 0], X_embedded[mask_g, 1], c='blue', label='Gauche', alpha=0.7)
         plt.scatter(X_embedded[mask_d, 0], X_embedded[mask_d, 1], c='red', label='Droite', alpha=0.7)
+        plt.scatter(X_embedded[mask_p, 0], X_embedded[mask_p, 1], c='green', label='Pieds', alpha=0.7)
         
         plt.title(f"Séparabilité Riemannienne (t-SNE)\n{len(features)} essais analysés")
         plt.legend()

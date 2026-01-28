@@ -62,10 +62,10 @@ def load_all_sessions():
         y = np.concatenate(y_list)
 
         # MAPPINGS: 1(L), 2(R), 3(F), 10(Rest)
-        # We assume 10 is Rest
+        # We filter to keep only ACTIVE classes (1, 2, 3)
+        # Marker 10 (Rest) is excluded as per recent decision to focus on active tasks
         
-        # We filter to keep only these valid markers
-        mask_valid = (y == 1) | (y == 2) | (y == 3) | (y == 10)
+        mask_valid = (y == 1) | (y == 2) | (y == 3)
         X = X[mask_valid]
         y = y[mask_valid]
         
@@ -73,7 +73,6 @@ def load_all_sessions():
         y_new[y == 1] = 0 # Left
         y_new[y == 2] = 1 # Right
         y_new[y == 3] = 2 # Feet
-        y_new[y == 10] = 3 # Rest
         y = y_new
         
         # Trim time dimension to match Fixed Input Size (750)
@@ -115,7 +114,8 @@ def main():
     
     # 2. Load Pre-Trained Model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = EEGNet(nb_classes=4, Chans=8, Samples=750).to(device) # NB_CLASSES=4
+    # CHANGED TO 3 CLASSES
+    model = EEGNet(nb_classes=3, Chans=8, Samples=750).to(device) 
     
     if os.path.exists(WEIGHTS_FILE):
         print("✅ Loading Physionet Weights...")
@@ -150,7 +150,12 @@ def main():
     
     criterion = nn.CrossEntropyLoss()
     # LOWER LEARNING RATE for full fine-tuning
+    # LOWER LEARNING RATE for full fine-tuning
     optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    
+    # SCHEDULER: Reduce LR if Val Loss plateaus
+    from torch.optim.lr_scheduler import ReduceLROnPlateau
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6)
     
     print("Fine-tuning on User Data (Full Network)...")
     
@@ -163,11 +168,9 @@ def main():
     best_epoch = -1
     best_model_path = os.path.join(MODELS_DIR, "eegnet_best.pth")
 
-    # Early Stopping
-    patience = 20
-    trigger_times = 0
+    best_model_path = os.path.join(MODELS_DIR, "eegnet_best.pth")
 
-    n_epochs = 100
+    n_epochs = 500
     for epoch in range(n_epochs):
         # TRAIN
         model.train()
@@ -213,18 +216,18 @@ def main():
         val_losses.append(val_epoch_loss)
         val_accs.append(val_epoch_acc)
         
-        print(f"Epoch {epoch+1}/{n_epochs} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.1f}% | Val Loss: {val_epoch_loss:.4f} | Val Acc: {val_epoch_acc:.1f}%")
+        # UPDATE SCHEDULER
+        scheduler.step(val_epoch_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        print(f"Epoch {epoch+1}/{n_epochs} | Loss: {epoch_loss:.4f} | Acc: {epoch_acc:.1f}% | Val Loss: {val_epoch_loss:.4f} | Val Acc: {val_epoch_acc:.1f}% | LR: {current_lr:.1e}")
 
-        # SAVE BEST MODEL & EARLY STOPPING (Based on ACCURACY)
+        # SAVE BEST MODEL (Based on ACCURACY)
         if val_epoch_acc > best_val_acc:
             best_val_acc = val_epoch_acc
             best_epoch = epoch + 1
-            trigger_times = 0 # Reset
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> ⭐ New Best Val Acc! Saved to eegnet_best.pth")
-        else:
-            trigger_times += 1
-            print(f"  -> No improvement (patience: {trigger_times}/{patience})")
 
         # ==========================================
         # LIVE PLOTTING (Every Epoch)
@@ -264,7 +267,7 @@ def main():
         plt.savefig(save_path)
         plt.close()
         
-        if trigger_times >= patience:
+        if False: # Early stopping removed
             print(f"� Early stopping! No improvement for {patience} epochs.")
             break
 

@@ -22,11 +22,11 @@ class EEGNet(nn.Module):
 
         # Layer 1
         self.conv1 = nn.Conv2d(1, F1, (1, kernLength), padding=(0, kernLength // 2), bias=False)
-        self.batchnorm1 = nn.BatchNorm2d(F1, False)
+        self.batchnorm1 = nn.BatchNorm2d(F1)
         
         # Layer 2
         self.conv2 = nn.Conv2d(F1, F1 * D, (Chans, 1), groups=F1, bias=False)
-        self.batchnorm2 = nn.BatchNorm2d(F1 * D, False)
+        self.batchnorm2 = nn.BatchNorm2d(F1 * D)
         self.elu = nn.ELU()
         self.avgpool1 = nn.AvgPool2d((1, 4))
         self.dropout1 = nn.Dropout(dropoutRate)
@@ -34,7 +34,7 @@ class EEGNet(nn.Module):
         # Layer 3
         self.conv3_depth = nn.Conv2d(F1 * D, F1 * D, (1, 16), padding=(0, 8), groups=F1 * D, bias=False)
         self.conv3_point = nn.Conv2d(F1 * D, F2, (1, 1), bias=False)
-        self.batchnorm3 = nn.BatchNorm2d(F2, False)
+        self.batchnorm3 = nn.BatchNorm2d(F2)
         self.avgpool2 = nn.AvgPool2d((1, 8))
         self.dropout2 = nn.Dropout(dropoutRate)
         
@@ -73,107 +73,21 @@ class EEGNet(nn.Module):
 def main():
     print("=== EEGNet PRE-TRAINING (Physionet) ===")
     
-    # Use ALL subjects for maximum rigor (1 to 109)
-    subjects = list(range(1, 46))
-    # subjects = list(range(1, 4)) # Debug mode
+    # CACHE PATH
+    CACHE_FILE = os.path.join(os.path.dirname(__file__), "physionet_cache_v2.npz")
     
-    # User Channels (Target)
-    target_channels = ['FC3', 'FC4', 'CP3', 'CZ', 'C3', 'C4', 'PZ', 'CP4']
-    
-    X_total = []
-    y_total = []
-    
-    print(f"Downloading/Loading data for {len(subjects)} subjects (Real + Imaginary)...")
-
-    # Mapping of Runs to Tasks:
-    runs_hands = [3, 7, 11, 4, 8, 12] # Real + Imag
-    runs_feet =  [5, 9, 13, 6, 10, 14] # Real + Imag
-
-    for subject in subjects:
-        try:
-            # --- PART 1: HANDS (Left vs Right) ---
-            fnames_hands = eegbci.load_data(subject, runs_hands)
-            raws_hands = [mne.io.read_raw_edf(f, preload=True, verbose=False) for f in fnames_hands]
-            raw_hands = mne.concatenate_raws(raws_hands)
-            
-            # --- PART 2: FEET (Feet) ---
-            fnames_feet = eegbci.load_data(subject, runs_feet)
-            raws_feet = [mne.io.read_raw_edf(f, preload=True, verbose=False) for f in fnames_feet]
-            raw_feet = mne.concatenate_raws(raws_feet)
-            
-            # Combine logic
-            for raw_tmp, task_type in [(raw_hands, 'hands'), (raw_feet, 'feet')]:
-                
-                # 1. Standardize Channels
-                mne.rename_channels(raw_tmp.info, lambda x: x.strip('.').upper()) 
-                
-                # Check availability
-                available_chs = raw_tmp.ch_names
-                missing = [ch for ch in target_channels if ch not in available_chs]
-                if missing:
-                    continue
-
-                # 2. Select Channels
-                raw_tmp.pick(target_channels)
-                
-                # 3. Filter & Resample
-                raw_tmp.filter(2., 40., fir_design='firwin', verbose=False)
-                if raw_tmp.info['sfreq'] != 250:
-                    raw_tmp.resample(250, npad="auto", verbose=False)
-                
-                # 4. Epoching
-                events, event_id_dict = mne.events_from_annotations(raw_tmp, verbose=False)
-                
-                # Define mapping
-                current_event_id = {}
-                if task_type == 'hands':
-                    # T1=Left(0), T2=Right(1)
-                    if 'T1' in event_id_dict: current_event_id[event_id_dict['T1']] = 0
-                    if 'T2' in event_id_dict: current_event_id[event_id_dict['T2']] = 1
-                else:
-                    # T2=Feet(2)
-                    if 'T2' in event_id_dict: current_event_id[event_id_dict['T2']] = 2
-                
-                if not current_event_id: continue
-                
-                valid_events = []
-                valid_labels = []
-                for ev in events:
-                    code = ev[2]
-                    if code in current_event_id:
-                        valid_events.append(ev)
-                        valid_labels.append(current_event_id[code])
-                
-                if not valid_events: continue
-                
-                valid_events = np.array(valid_events)
-                
-                epochs = mne.Epochs(raw_tmp, valid_events, event_id=None, tmin=0, tmax=3.0, 
-                                    proj=False, baseline=None, verbose=False)
-                
-                data = epochs.get_data() # (N, 8, 751)
-                
-                # Crop to 750 (3s)
-                if data.shape[2] > 750:
-                    data = data[:, :, :750]
-                elif data.shape[2] < 750:
-                    continue # Skip incomplete
-                
-                X_total.append(data)
-                y_total.append(np.array(valid_labels))
-            
-            print(f"  Subject {subject}: Processed.")
-
-        except Exception as e:
-            print(f"  ⚠️ Skipping Subject {subject}: {e}")
-            continue
-
-    if len(X_total) == 0:
-        print("❌ Failed to load any data.")
+    if os.path.exists(CACHE_FILE):
+        print(f"🚀 Loading Cached Data from {CACHE_FILE}...")
+        data = np.load(CACHE_FILE)
+        X = data['X']
+        y = data['y']
+    else:
+        print(f"❌ Cache not found: {CACHE_FILE}")
+        print("   Please run 'python tools/cache_physionet.py' first to build the dataset.")
         return
-
-    X = np.concatenate(X_total)
-    y = np.concatenate(y_total)
+    
+    # Validation of shape
+    print(f"   Loaded Shape: {X.shape}")
     
     # Reshape for PyTorch: (Batch, 1, Channels, Time)
     X = X.reshape(X.shape[0], 1, 8, 750)
@@ -200,7 +114,11 @@ def main():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
-    n_epochs = 150
+    # SCHEDULER (User Request)
+    from torch.optim.lr_scheduler import ReduceLROnPlateau
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6)
+    
+    n_epochs = 1000
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
@@ -239,19 +157,19 @@ def main():
         val_loss = val_running_loss/len(test_loader)
         val_losses.append(val_loss)
         
-        print(f"Epoch {epoch+1}/{n_epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+        # UPDATE SCHEDULER
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]['lr']
+        
+        print(f"Epoch {epoch+1}/{n_epochs} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f} | LR: {current_lr:.1e}")
 
         # Save Best Model & Early Stopping
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch + 1
-            trigger_times = 0 # Reset
             best_model_path = os.path.join(os.path.dirname(__file__), "eegnet_physionet_best.pth")
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> ⭐ New Best Val Loss! Saved to eegnet_physionet_best.pth")
-        else:
-            trigger_times += 1
-            print(f"  -> No improvement (patience: {trigger_times}/{patience})")
             
         # ==========================================
         # LIVE PLOTTING (Every Epoch)
@@ -274,9 +192,7 @@ def main():
         plt.close() # Close to free memory
         
         # Check early stopping AFTER plotting so we capture the last state
-        if trigger_times >= patience:
-            print(f"🛑 Early stopping! No improvement for {patience} epochs.")
-            break
+        # (EARLY STOPPING REMOVED BY USER REQUEST)
         
     # Save Final Weights (Optional)
     model_path = os.path.join(os.path.dirname(__file__), "eegnet_physionet_weights.pth")

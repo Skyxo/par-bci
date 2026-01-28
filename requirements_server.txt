@@ -10,6 +10,8 @@ pygame
 joblib
 colorama
 pylsl
-torch --index-url https://download.pytorch.org/whl/cu121
-torchvision --index-url https://download.pytorch.org/whl/cu121
-torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Titan Xp (Pascal 6.1) needs CUDA 11.8 and older PyTorch (2.2.0 or so)
+--index-url https://download.pytorch.org/whl/cu118
+torch==2.2.0
+torchvision==0.17.0
+torchaudio==2.2.0

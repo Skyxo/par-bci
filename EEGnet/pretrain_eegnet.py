@@ -1,4 +1,6 @@
 import numpy as np
+import datetime
+import os
 import mne
 import torch
 import torch.nn as nn
@@ -75,6 +77,12 @@ def main():
     
     # CACHE PATH
     CACHE_FILE = os.path.join(os.path.dirname(__file__), "physionet_cache_v2.npz")
+    
+    # OUTPUT DIRS
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.join(os.path.dirname(__file__), "runs", f"pretrain_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"📂 Output Directory: {run_dir}")
     
     if os.path.exists(CACHE_FILE):
         print(f"🚀 Loading Cached Data from {CACHE_FILE}...")
@@ -167,7 +175,10 @@ def main():
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch + 1
-            best_model_path = os.path.join(os.path.dirname(__file__), "eegnet_physionet_best.pth")
+            best_epoch = epoch + 1
+            best_model_path = os.path.join(run_dir, "eegnet_physionet_best.pth")
+            torch.save(model.state_dict(), best_model_path)
+            print(f"  -> ⭐ New Best Val Loss! Saved to {best_model_path}")
             torch.save(model.state_dict(), best_model_path)
             print(f"  -> ⭐ New Best Val Loss! Saved to eegnet_physionet_best.pth")
             
@@ -187,7 +198,11 @@ def main():
         plt.ylabel('Loss')
         plt.legend()
         plt.grid(True)
-        save_path = os.path.join(os.path.dirname(__file__), 'pretrain_loss.png')
+        plt.legend()
+        plt.grid(True)
+        save_path = os.path.join(run_dir, 'pretrain_loss.png')
+        plt.savefig(save_path)
+        plt.close() # Close to free memory
         plt.savefig(save_path)
         plt.close() # Close to free memory
         
@@ -195,7 +210,7 @@ def main():
         # (EARLY STOPPING REMOVED BY USER REQUEST)
         
     # Save Final Weights (Optional)
-    model_path = os.path.join(os.path.dirname(__file__), "eegnet_physionet_weights.pth")
+    model_path = os.path.join(run_dir, "eegnet_physionet_weights.pth")
     torch.save(model.state_dict(), model_path)
     print(f"✅ Final Model saved to {model_path}")
 

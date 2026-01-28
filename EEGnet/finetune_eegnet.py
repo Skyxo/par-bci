@@ -9,6 +9,7 @@ from sklearn.model_selection import train_test_split
 import os
 import glob
 import sys
+import datetime
 import matplotlib.pyplot as plt
 
 # Import EEGNet architecture
@@ -97,6 +98,12 @@ def main():
     # 1. Load User Data (ALL SESSIONS)
     X, y = load_all_sessions()
     
+    # OUTPUT DIRS
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.join(os.path.dirname(__file__), "runs", f"finetune_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"📂 Output Directory: {run_dir}")
+    
     if X is None or len(X) == 0:
         print("❌ No valid epochs found.")
         return
@@ -165,8 +172,9 @@ def main():
     val_accs = []
     
     best_val_acc = 0.0
+    best_val_acc = 0.0
     best_epoch = -1
-    best_model_path = os.path.join(MODELS_DIR, "eegnet_best.pth")
+    best_model_path = os.path.join(run_dir, "eegnet_best.pth")
 
     best_model_path = os.path.join(MODELS_DIR, "eegnet_best.pth")
 
@@ -263,7 +271,7 @@ def main():
         plt.grid(True)
         
         plt.tight_layout()
-        save_path = os.path.join(os.path.dirname(__file__), 'finetune_results.png')
+        save_path = os.path.join(run_dir, 'finetune_results.png')
         plt.savefig(save_path)
         plt.close()
         
@@ -272,7 +280,7 @@ def main():
             break
 
     # Save Fine-Tuned Model (Final state)
-    user_model_path = os.path.join(MODELS_DIR, "eegnet_user.pth")
+    user_model_path = os.path.join(run_dir, "eegnet_user.pth")
     torch.save(model.state_dict(), user_model_path)
     print(f"✅ Final model saved: {user_model_path}")
     print(f"🏆 Best model (used for replay): {best_model_path}")

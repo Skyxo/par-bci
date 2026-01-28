@@ -1,3 +1,17 @@
 venv/
 __pycache__/
 *.pyc
+
+# Data Files (Too large for GitHub)
+*.csv
+*.edf
+*.gdf
+*.bdf
+*.npz
+*.pkl
+*.pth
+
+# Directories
+mne_data/
+processed_data/
+models/

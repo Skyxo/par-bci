@@ -1,0 +1,24 @@
+name: bci_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - scipy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - pip:
+    - --extra-index-url https://download.pytorch.org/whl/cu121
+    - torch
+    - torchvision
+    - torchaudio
+    - mne
+    - brainflow
+    - pyriemann
+    - pygame
+    - joblib
+    - colorama
+    - pylsl

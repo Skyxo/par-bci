@@ -8,6 +8,7 @@ __pycache__/
 *.gdf
 *.bdf
 *.npz
+*.npy
 *.pkl
 *.pth
 

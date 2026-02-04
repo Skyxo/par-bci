@@ -14,18 +14,20 @@ RECORD_REST_MARKERS = True # Re-enabled as requested
 
 # --- MARQUEURS (CORRIGÉS) ---
 # IMPORTANT : J'ai remplacé 0 par 10 pour la Baseline car BrainFlow interdit le 0
-MARKER_BASELINE = 10 
+MARKER_REST = 10 
 MARKER_LEFT = 1 
 MARKER_RIGHT = 2 
 MARKER_FEET = 3 
 
-# --- TIMINGS ---
-# --- TIMINGS (ACCELERATED) ---
-t_BASELINE = 1.25      # (Reference only, used randomized below)
-t_ACTION = 4.0         # Maintained (Brain needs time to generate pattern)
-t_RELAX = 1.0          # Reduced from 2.0
-t_REST_MIN = 1.5       # Reduced from 2.5
-t_REST_MAX = 2.5       # Reduced from 4.0
+# --- CONFIG ELECTRODES ---
+CH_NAMES = ['FC3', 'FC4', 'CP3', 'Cz', 'C3', 'C4', 'Pz', 'CP4'] 
+
+# --- TIMINGS (HIGH-GAMMA DATASET PROTOCOL) ---
+t_ACTION = 4.0         # Maintained
+t_FIXATION_MIN = 2.0   # 2.0s to 3.0s
+t_FIXATION_MAX = 3.0
+t_INTER_TRIAL_MIN = 3.0 # 3.0s to 4.0s (Relaxation/Black Screen)
+t_INTER_TRIAL_MAX = 4.0
 
 # --- STRUCTURE ---
 # Pour un bon entraînement BCI: minimum 30 essais par classe
@@ -172,9 +174,9 @@ class BCIProtocol:
             "PROTOCOLE D'IMAGERIE MOTRICE - GRAZ ACTIVE REST",
             "",
             "3 PHASES par essai :",
-            "1. Croix (+): Attention (1-1.5s)",
+            "1. Croix (+): Attention (2-3s)",
             "2. Action/Repos : Imaginez OU Reposez-vous (4s)",
-            "3. Relâchement : Pause courte (2s)",
+            "3. Relâchement : Pause (3-4s)",
             "",
             "Le 'REPOS' est maintenant une action comme les autres.",
             "Restez concentré du début à la fin !",
@@ -196,7 +198,7 @@ class BCIProtocol:
             trials = [MARKER_LEFT] * TRIALS_PER_CLASS_PER_RUN + \
                      [MARKER_RIGHT] * TRIALS_PER_CLASS_PER_RUN + \
                      [MARKER_FEET] * TRIALS_PER_CLASS_PER_RUN + \
-                     [MARKER_BASELINE] * TRIALS_PER_CLASS_PER_RUN # REPOS
+                     [MARKER_REST] * TRIALS_PER_CLASS_PER_RUN # REPOS
             
             random.shuffle(trials)
 
@@ -204,8 +206,8 @@ class BCIProtocol:
                 # -------------------------------------------------
                 # PHASE 1: FIXATION / PRE-CUE (Black Screen + Cross)
                 # -------------------------------------------------
-                # Randomize duration (1.0s to 1.5s) to avoid rhythm locking
-                t_fixation = random.uniform(1.0, 1.5)
+                # Randomize duration (2.0s to 3.0s) to avoid rhythm locking
+                t_fixation = random.uniform(t_FIXATION_MIN, t_FIXATION_MAX)
                 
                 self.draw_fixation()
                 
@@ -224,7 +226,7 @@ class BCIProtocol:
                 if marker == MARKER_LEFT: dir_str = 'left'
                 elif marker == MARKER_RIGHT: dir_str = 'right'
                 elif marker == MARKER_FEET: dir_str = 'feet'
-                elif marker == MARKER_BASELINE: dir_str = 'rest'
+                elif marker == MARKER_REST: dir_str = 'rest'
                 
                 self.draw_cue(dir_str)
                 self.board.insert_marker(marker)
@@ -240,8 +242,9 @@ class BCIProtocol:
                 # Mandatory break between trials to allow ERS rebound
                 self.screen.fill((0,0,0)) 
                 pygame.display.flip()
-                print("  -> Relâchement (Inter-Essai) (2s)")
-                if not self.smart_sleep(t_RELAX):
+                t_relax = random.uniform(t_INTER_TRIAL_MIN, t_INTER_TRIAL_MAX)
+                print(f"  -> Relâchement (Inter-Essai) ({t_relax:.1f}s)")
+                if not self.smart_sleep(t_relax):
                     self.save_and_quit()
                     return
                 
@@ -250,17 +253,89 @@ class BCIProtocol:
 
             # Fin du Run - Prompt Utilisateur
             if run_idx < NUMBER_OF_RUNS - 1:
-                self.draw_text_screen([
-                    f"FIN DU RUN {run_idx + 1}", 
-                    "", 
-                    "[ESPACE] : Continuer (Prochain Run)", 
-                    "[ECHAP] : Arrêter et Sauvegarder"
-                ])
-                # Insert End of Run Marker
-                self.board.insert_marker(99)
-                if not self.wait_for_start(): return
+                if not self.wait_between_runs(run_idx): return
 
         self.save_and_quit()
+
+    def draw_signal_quality(self):
+        """Affiche les barres de qualité du signal pour les 8 électrodes."""
+        # Get last 250 samples (1 second approx)
+        data = self.board.get_current_board_data(250)
+        if data.shape[1] < 10: return # Not enough data yet
+
+        # EEG Channels are 1-8 (indices 1 to 8 inclusive) for Cyton
+        # Standard deviation in uV
+        eeg_data = data[1:9, :]
+        stds = np.std(eeg_data, axis=1)
+
+        # Layout
+        bar_width = 60
+        spacing = 20
+        start_x = (self.width - (8 * (bar_width + spacing))) // 2
+        base_y = self.height - 150
+        max_height = 200
+
+        # Title
+        title = self.font_small.render("QUALITÉ DU SIGNAL (Ecart-Type < 20uV = Bon)", True, (200, 200, 200))
+        self.screen.blit(title, (self.width//2 - title.get_width()//2, base_y - max_height - 40))
+
+        for i in range(8):
+            val = stds[i]
+            x = start_x + i * (bar_width + spacing)
+            
+            # Color logic
+            if val < 20: color = (0, 255, 0)      # Good
+            elif val < 50: color = (255, 165, 0)  # Warning
+            else: color = (255, 0, 0)             # Bad
+
+            # Bar height (clamped)
+            h = min(val * 2, max_height) # Scale factor
+            
+            # Draw Bar
+            pygame.draw.rect(self.screen, color, (x, base_y - h, bar_width, h))
+            
+            # Draw Value
+            val_text = self.font_small.render(f"{val:.1f}", True, (255, 255, 255))
+            self.screen.blit(val_text, (x + (bar_width-val_text.get_width())//2, base_y - h - 25))
+
+            # Draw Label
+            if i < len(CH_NAMES):
+                label = self.font_small.render(CH_NAMES[i], True, (255, 255, 255))
+                self.screen.blit(label, (x + (bar_width-label.get_width())//2, base_y + 10))
+
+    def wait_between_runs(self, run_idx):
+        """Pause interactive entre les runs avec visualisation du signal."""
+        waiting = True
+        while waiting:
+            self.screen.fill(self.bg_color)
+            
+            # Header
+            header = self.font.render(f"FIN DU RUN {run_idx + 1}", True, (255, 255, 0))
+            self.screen.blit(header, (self.width//2 - header.get_width()//2, 50))
+            
+            instr = self.font_small.render("[ESPACE] : Continuer   |   [ECHAP] : Quitter", True, (255, 255, 255))
+            self.screen.blit(instr, (self.width//2 - instr.get_width()//2, 100))
+
+            # Signal Quality Live Code
+            self.draw_signal_quality()
+            
+            pygame.display.flip()
+
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.save_and_quit()
+                    return False
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        # Insert End of Run Marker before continuing
+                        self.board.insert_marker(99)
+                        return True
+                    if event.key == pygame.K_ESCAPE:
+                        self.save_and_quit()
+                        return False
+            
+            time.sleep(0.05)
+        return True
 
     def wait_for_retry(self):
         """Menu boucle pour réessayer la connexion"""
@@ -318,6 +393,8 @@ class BCIProtocol:
         else:
             print("❌ Aucune donnée à sauvegarder.")
 
+        if hasattr(self, 'board'):
+            del self.board
         pygame.quit()
         exit()
 

@@ -27,7 +27,7 @@ TMIN = 0.0
 TMAX = 4.0 
 # Filters
 L_FREQ = 1.0  # High-pass to remove drift
-H_FREQ = 40.0 # Low-pass to remove mains/muscle HF noise
+H_FREQ = 100.0 # Low-pass to keep Gamma (up to ~90-100Hz). Nyquist is 125Hz.
 
 def preprocess_all():
     print("=== 🧹 STARTING DATA CLEANING (STRICT 0-4s) ===")
@@ -76,8 +76,9 @@ def preprocess_all():
             # Apply Filtering
             info = mne.create_info(CH_NAMES, SFREQ, 'eeg')
             raw = mne.io.RawArray(raw_data, info, verbose=False)
-            raw.notch_filter(50, verbose=False)
-            raw.filter(L_FREQ, H_FREQ, verbose=False)
+            # raw.notch_filter(50, verbose=False) # User requested NO filters
+            # raw.filter(L_FREQ, H_FREQ, verbose=False) # User requested NO filters
+            print("      ⚠️ Filters disabled by user request (Raw Data).")
             
             clean_data = raw.get_data() # (8, n_total)
             

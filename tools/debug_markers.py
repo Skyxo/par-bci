@@ -1,59 +1,52 @@
 import pandas as pd
-import numpy as np
-import glob
-import os
+import matplotlib.pyplot as plt
+import sys
 
-def analyze_file(fname):
-    print(f"\n🔍 ANALYZING: {os.path.basename(fname)}")
+def plot_markers(csv_path):
+    print(f"Analyzing {csv_path}...")
+    # Load only the marker column (index 23) and timestamp (index 22)
+    # Using python engine for flexibility with potential bad lines
     try:
-        try:
-            df = pd.read_csv(fname, sep='\t', header=None)
-        except:
-            df = pd.read_csv(fname, sep=',', header=None)
-            
-        print(f"   Shape: {df.shape}")
-        
-        # Check Timestamp (Col 0)
-        timestamps = df.iloc[:, 0].values
-        fs_est = 1 / np.mean(np.diff(timestamps))
-        print(f"   Estimated Fs: {fs_est:.2f} Hz")
-        
-        # Check Markers (Col 23 or last)
-        markers = df.iloc[:, 23].values
-        
-        # Find changes
-        diff_markers = np.diff(markers, prepend=0)
-        # Starts
-        starts = np.where((diff_markers != 0) & (markers != 0))[0]
-        # Ends (next change)
-        ends = []
-        for s in starts:
-            # Find next change index after s
-            next_changes = np.where(diff_markers[s+1:] != 0)[0]
-            if len(next_changes) > 0:
-                ends.append(s + 1 + next_changes[0])
-            else:
-                ends.append(len(markers)) # To end of file
-        
-        ends = np.array(ends)
-        vals = markers[starts]
-        
-        print(f"   Found {len(starts)} markers.")
-        if len(starts) > 0:
-            print(f"   First 5 markers: {vals[:5]}")
-            durations = ends - starts
-            durations_sec = durations / fs_est
-            print(f"   Durations (samples): Min={min(durations)}, Max={max(durations)}, Mean={np.mean(durations):.1f}")
-            print(f"   Durations (sec):     Min={min(durations_sec):.3f}s, Max={max(durations_sec):.3f}s")
-            
-            # Check for very short markers
-            shorties = np.sum(durations_sec < 0.5)
-            if shorties > 0:
-                print(f"   ⚠️ WARNING: {shorties} markers are shorter than 0.5s!")
-                
+        df = pd.read_csv(csv_path, sep='\t', header=None, usecols=[22, 23], names=['Time', 'Marker'])
     except Exception as e:
-        print(f"   ❌ Error: {e}")
+        print(f"Error reading CSV: {e}")
+        return
 
-files = glob.glob("EEG_Session_*.csv")
-for f in files:
-    analyze_file(f)
+    # Filter non-zero markers
+    events = df[df['Marker'] != 0]
+    
+    if events.empty:
+        print("No markers found!")
+        return
+
+    print("Marker Counts:")
+    print(events['Marker'].value_counts().sort_index())
+
+    # Map markers to labels and colors
+    marker_map = {1: 'Left', 2: 'Right', 3: 'Feet', 10: 'Rest', 99: 'EndRun'}
+    colors = {1: 'red', 2: 'blue', 3: 'green', 10: 'grey', 99: 'black'}
+
+    plt.figure(figsize=(15, 6))
+    
+    # Plot each event type
+    for m in events['Marker'].unique():
+        subset = events[events['Marker'] == m]
+        label = marker_map.get(m, str(m))
+        color = colors.get(m, 'purple')
+        plt.scatter(subset['Time'], [m]*len(subset), label=f"{label} ({m})", color=color, s=100, alpha=0.7)
+
+    plt.yticks(list(marker_map.keys()), list(marker_map.values()))
+    plt.xlabel("Timestamp (Unix)")
+    plt.title(f"Marker Timeline: {csv_path}")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    output_file = "marker_timeline.png"
+    plt.savefig(output_file)
+    print(f"Timeline plot saved to {output_file}")
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        plot_markers(sys.argv[1])
+    else:
+        print("Usage: python script.py <csv_file>")

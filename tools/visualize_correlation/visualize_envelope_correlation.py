@@ -25,30 +25,21 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 PROCESSED_DIR = os.path.join(BASE_DIR, "processed_data")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "results")
 
-def load_data():
-    """Loads X and y from processed_data directory and crops to active task."""
-    print(f"Searching for data in: {PROCESSED_DIR}")
-    X_files = [os.path.join(PROCESSED_DIR, "X_EEG_Session_2026-02-03_19-21.npy")]
-    if not X_files:
-        print("No X_*.npy files found.")
-        return None, None
+def load_data(x_path):
+    """Loads X and y from the specified X path."""
+    print(f"Loading data from: {x_path}")
     
-    X_list, y_list = [], []
-    for f in X_files:
-        base = os.path.basename(f).replace("X_", "y_")
-        y_f = os.path.join(PROCESSED_DIR, base)
-        if os.path.exists(y_f):
-            print(f"Loading {f} and {y_f}")
-            X_list.append(np.load(f))
-            y_list.append(np.load(y_f))
-        else:
-            print(f"Warning: Corresponding y file not found for {f}")
-            
-    if not X_list:
+    if not os.path.exists(x_path):
+        print(f"Error: File {x_path} not found.")
         return None, None
         
-    X = np.concatenate(X_list)
-    y = np.concatenate(y_list)
+    y_path = x_path.replace("X_", "y_")
+    if not os.path.exists(y_path):
+        print(f"Error: Corresponding labels file {y_path} not found.")
+        return None, None
+        
+    X = np.load(x_path)
+    y = np.load(y_path)
     
     # CROP DATA: From 0.5s to 3.5s (Action phase is 4s, cut start/end transients)
     # X shape: (n_trials, n_channels, n_times)
@@ -173,11 +164,17 @@ def plot_correlation_maps(correlations, info, bands, classes):
     return fig
 
 def main():
-    print("Starting Envelope-Class Correlation Analysis...")
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    import argparse
+    parser = argparse.ArgumentParser(description='Visualize envelope correlation.')
+    parser.add_argument('input_file', help='Path to X.npy file')
+    parser.add_argument('--output_dir', default=OUTPUT_DIR, help='Directory to save results')
+    args = parser.parse_args()
+
+    print(f"Starting Envelope-Class Correlation Analysis on {args.input_file}...")
+    os.makedirs(args.output_dir, exist_ok=True)
     
     # 1. Load Data
-    X, y = load_data()
+    X, y = load_data(args.input_file)
     if X is None:
         print("Failed to load data.")
         return
@@ -219,7 +216,10 @@ def main():
     print("\nGenerating Plot...")
     fig = plot_correlation_maps(all_correlations, info, BANDS, available_classes)
     
-    save_path = os.path.join(OUTPUT_DIR, "envelope_class_correlations_19-21.png")
+    # Generate filename from input file
+    base_name = os.path.basename(args.input_file).replace("X_EEG_Session_", "").replace(".npy", "")
+    save_path = os.path.join(args.output_dir, f"envelope_correlation_{base_name}.png")
+    
     fig.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Saved figure to {save_path}")
 

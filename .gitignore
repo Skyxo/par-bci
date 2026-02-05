@@ -13,12 +13,6 @@ __pycache__/
 *.pth
 
 # Directories
-mne_data/
-processed_data/
-processed_data_3_class/
-models/
-runs/
-EEGnet/runs/
 
 # Generated Plots (Ignore by default to avoid pollution)
 *.png

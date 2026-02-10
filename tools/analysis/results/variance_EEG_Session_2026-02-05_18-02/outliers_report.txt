@@ -1,0 +1,7 @@
+Outlier Report for EEG_Session_2026-02-05_18-02
+================================
+Trial 057 [Left]: +5.30 sigma from mean
+Trial 108 [Right]: +3.93 sigma from mean
+Trial 055 [Feet]: +3.12 sigma from mean
+Trial 097 [Feet]: +3.76 sigma from mean
+Trial 105 [Rest]: +4.32 sigma from mean

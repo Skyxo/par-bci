@@ -54,8 +54,9 @@ Voici le détail du contenu de chaque fichier CSV détecté :
 | **2026-01-14_13-35** | 30 | 30 | 30 | **90** | 180 | Session complète (mais déséquilibre Repos) |
 | **2026-01-14_14-01** | 6 | 6 | 6 | 0 | 18 | Session partielle (Test ?) |
 | **2026-01-14_14-06** | 6 | 6 | 6 | 0 | 18 | Session partielle (Test ?) |
-| **2026-02-03_18-06** | 13 | 16 | 12 | 12 | 53 | **Valide mais atypique**. Contient 2 Runs Complets (2x24) et 1 Run avorté au début (5 essais). Une pause de 20min a eu lieu après le Run 2. |
+| **2026-02-03_18-06** | 13 | 16 | 12 | 12 | 53 | **Valide mais atypique**. Contient 2 Runs Complets et 1 Run avorté. Fichier lourd (~116Mo) car **enregistrement continu pendant 30min** (inclut longues pauses sans marqueurs). |
 | **2026-02-03_19-21** | **30** | **30** | **30** | **30** | **120** | **Session Parfaite (Équilibrée)** |
+| **2026-02-05_18-02** | **30** | **30** | **30** | **30** | **120** | **Session Parfaite (Équilibrée)**. Nouvelle référence pour l'entraînement. |
 
 > [!TIP]
-> Pour l'entraînement, privilégiez la session du **03/02 à 19h21**, car elle contient exactement 30 exemples par classe, parfaitement équilibrés.
+> Pour l'entraînement, privilégiez les sessions du **03/02 à 19h21** et **05/02 à 18h02**, car elles sont parfaitement équilibrées (30 exemples/classe).

@@ -1,4 +1,5 @@
 import time
+import os
 import datetime
 import numpy as np
 import pygame
@@ -386,7 +387,11 @@ class BCIProtocol:
             data = None
 
         if data is not None and data.size > 0:
-            filename = f"EEG_Session_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv"
+            # Create folder if it doesn't exist
+            output_folder = "data_markiv"
+            os.makedirs(output_folder, exist_ok=True)
+            
+            filename = os.path.join(output_folder, f"EEG_Session_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv")
             DataFilter.write_file(data, filename, 'w')
             print(f"✅ SUCCÈS : Fichier sauvegardé : {filename}")
             print(f"Échantillons récupérés : {data.shape[1]}")

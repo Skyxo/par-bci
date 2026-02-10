@@ -1,4 +1,5 @@
 import time
+import os
 import datetime
 import numpy as np
 import pygame
@@ -57,8 +58,19 @@ class BCIProtocol:
             if self.board.is_prepared():
                 self.board.release_session()
             self.board.prepare_session()
-            self.board.start_stream()
-            print("--- FLUX EEG DÉMARRÉ ---")
+            self.board.config_board("~6") # Force 250Hz just in case
+            # BrainFlow default ring buffer is 450000 (30 mins @ 250Hz).
+            # We increase it to 2 hours to be safe.
+            # However, prepare_session doesn't take buffer size args in Python directly for ring buffer?
+            # Actually, start_stream takes num_samples. But get_board_data() takes num_samples.
+            # If we don't specify, it gets all. LIMIT IS INTERNAL RING BUFFER.
+            # To increase ring buffer, we need to pass "streamer_params" string or use add_streamer?
+            # Wait, BrainFlow 5+: prepare_session(type, params)
+            # Actually, the 450000 limit is often hardcoded in BoardShim default or start_stream.
+            # But wait! BoardShim.start_stream(num_samples=450000, streamer_params=None)
+            # The first arg is buffer size! Default is 450000.
+            self.board.start_stream(1800000) # 2 hours @ 250Hz
+            print("--- FLUX EEG DÉMARRÉ (Buffer: 2h) ---")
             self.connected = True
             time.sleep(2)
         except BrainFlowError as e:
@@ -386,7 +398,11 @@ class BCIProtocol:
             data = None
 
         if data is not None and data.size > 0:
-            filename = f"EEG_Session_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv"
+            # Create folder if it doesn't exist
+            output_folder = "data_markiv"
+            os.makedirs(output_folder, exist_ok=True)
+            
+            filename = os.path.join(output_folder, f"EEG_Session_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}.csv")
             DataFilter.write_file(data, filename, 'w')
             print(f"✅ SUCCÈS : Fichier sauvegardé : {filename}")
             print(f"Échantillons récupérés : {data.shape[1]}")

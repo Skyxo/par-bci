@@ -21,8 +21,7 @@ def validate_transfer():
     os.makedirs(output_dir, exist_ok=True)
     
     file_paths = [
-        os.path.join(data_dir, "EEG_Session_2026-02-05_18-02.csv"),
-        os.path.join(data_dir, "EEG_Session_2026-02-03_19-21.csv")
+        os.path.join(data_dir, "EEG_Session_2026-02-10_17-10.csv")
     ]
     
     # 1. Load User Data
